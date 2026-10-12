@@ -12,6 +12,7 @@
    ```bash
    npm install
    cp .env.example .env   # set DB_HOST / DB_PORT / DB_USER / DB_PASSWORD / DB_NAME and JWT_SECRET
+   npm run migrate        # optional: create the database and tables only (no demo data). Safe to re-run.
    npm run dev            # http://localhost:4000 – creates the tables and seeds demo data on an empty database
    npm test               # runs against a separate database: ilm_hr_test
    npm run seed           # wipe & re-seed demo data
