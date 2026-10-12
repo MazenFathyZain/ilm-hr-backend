@@ -41,7 +41,7 @@ export function lateMinutesFor(localMinutes, settings) {
  * Finds the nearest assigned location and whether the coordinates fall inside its radius.
  * Throws a descriptive 422 if the user has no locations or is outside all of them.
  */
-function resolveLocation(userId, body) {
+async function resolveLocation(userId, body) {
   requireFields(body, ['latitude', 'longitude']);
   // The app reports whether the OS flagged the position as coming from a mock-location provider.
   if (body.is_mocked === true) {
@@ -50,7 +50,7 @@ function resolveLocation(userId, body) {
   const lat = assertNumber(body.latitude, 'latitude', { min: -90, max: 90 });
   const lng = assertNumber(body.longitude, 'longitude', { min: -180, max: 180 });
 
-  const locations = assignedLocations(userId);
+  const locations = await assignedLocations(userId);
   if (!locations.length) {
     throw unprocessable('You have no check-in locations assigned. Please contact your manager.', 'no_location_assigned');
   }
@@ -69,53 +69,53 @@ function resolveLocation(userId, body) {
   return { location: inside, lat, lng };
 }
 
-export function todayStatus(userId) {
-  const settings = getSettings();
+export async function todayStatus(userId) {
+  const settings = await getSettings();
   const now = zonedParts(new Date(), settings.timezone);
-  const record = get(`${RECORD_SELECT} WHERE a.user_id = ? AND a.work_date = ?`, userId, now.date);
+  const record = await get(`${RECORD_SELECT} WHERE a.user_id = ? AND a.work_date = ?`, userId, now.date);
   return {
     date: now.date,
     server_time: now.time,
     work_start: settings.work_start,
     work_end: settings.work_end,
-    is_working_day: isWorkingDay(now.date, settings, holidaySet(now.date, now.date)),
+    is_working_day: isWorkingDay(now.date, settings, await holidaySet(now.date, now.date)),
     record: present(record, settings.timezone),
     can_check_in: !record?.check_in_at,
     can_check_out: !!record?.check_in_at && !record?.check_out_at,
-    locations: assignedLocations(userId),
+    locations: await assignedLocations(userId),
   };
 }
 
-export function checkIn(userId, body) {
-  const settings = getSettings();
+export async function checkIn(userId, body) {
+  const settings = await getSettings();
   const now = new Date();
   const local = zonedParts(now, settings.timezone);
-  const existing = get('SELECT * FROM attendance WHERE user_id = ? AND work_date = ?', userId, local.date);
+  const existing = await get('SELECT * FROM attendance WHERE user_id = ? AND work_date = ?', userId, local.date);
   if (existing?.check_in_at) throw conflict('You have already checked in today', 'already_checked_in');
 
-  const { location, lat, lng } = resolveLocation(userId, body);
+  const { location, lat, lng } = await resolveLocation(userId, body);
   const late = lateMinutesFor(local.minutes, settings);
-  run(
+  await run(
     `INSERT INTO attendance (user_id, work_date, check_in_at, check_in_location_id, check_in_lat, check_in_lng, late_minutes)
      VALUES (?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(user_id, work_date) DO UPDATE SET check_in_at = excluded.check_in_at,
-       check_in_location_id = excluded.check_in_location_id, check_in_lat = excluded.check_in_lat,
-       check_in_lng = excluded.check_in_lng, late_minutes = excluded.late_minutes`,
+     ON DUPLICATE KEY UPDATE check_in_at = VALUES(check_in_at),
+       check_in_location_id = VALUES(check_in_location_id), check_in_lat = VALUES(check_in_lat),
+       check_in_lng = VALUES(check_in_lng), late_minutes = VALUES(late_minutes)`,
     userId, local.date, now.toISOString(), location.id, lat, lng, late,
   );
   return todayStatus(userId);
 }
 
-export function checkOut(userId, body) {
-  const settings = getSettings();
+export async function checkOut(userId, body) {
+  const settings = await getSettings();
   const now = new Date();
   const local = zonedParts(now, settings.timezone);
-  const existing = get('SELECT * FROM attendance WHERE user_id = ? AND work_date = ?', userId, local.date);
+  const existing = await get('SELECT * FROM attendance WHERE user_id = ? AND work_date = ?', userId, local.date);
   if (!existing?.check_in_at) throw conflict('You have not checked in today', 'not_checked_in');
   if (existing.check_out_at) throw conflict('You have already checked out today', 'already_checked_out');
 
-  const { location, lat, lng } = resolveLocation(userId, body);
-  run(
+  const { location, lat, lng } = await resolveLocation(userId, body);
+  await run(
     'UPDATE attendance SET check_out_at = ?, check_out_location_id = ?, check_out_lat = ?, check_out_lng = ? WHERE id = ?',
     now.toISOString(), location.id, lat, lng, existing.id,
   );
@@ -123,8 +123,8 @@ export function checkOut(userId, body) {
 }
 
 /** Dates covered by approved leave or missions for a user in a range. */
-function excusedDates(userId, from, to) {
-  const rows = all(
+async function excusedDates(userId, from, to) {
+  const rows = await all(
     `SELECT type, start_date, end_date FROM requests
      WHERE user_id = ? AND status = 'approved' AND type IN ('leave','mission')
        AND start_date <= ? AND end_date >= ?`,
@@ -137,22 +137,22 @@ function excusedDates(userId, from, to) {
   return set;
 }
 
-export function monthSummary(userId, month) {
-  const settings = getSettings();
+export async function monthSummary(userId, month) {
+  const settings = await getSettings();
   const { from, to } = monthRange(month);
-  const user = get('SELECT hire_date, created_at FROM users WHERE id = ?', userId);
+  const user = await get('SELECT hire_date, created_at FROM users WHERE id = ?', userId);
   const today = zonedParts(new Date(), settings.timezone).date;
 
-  const records = all('SELECT * FROM attendance WHERE user_id = ? AND work_date BETWEEN ? AND ?', userId, from, to);
+  const records = await all('SELECT * FROM attendance WHERE user_id = ? AND work_date BETWEEN ? AND ?', userId, from, to);
   const attended = new Set(records.filter((r) => r.check_in_at).map((r) => r.work_date));
-  const excused = excusedDates(userId, from, to);
+  const excused = await excusedDates(userId, from, to);
 
   // Absences are counted for finished working days only, starting from the hire date.
   const startedOn = user?.hire_date ?? user?.created_at?.slice(0, 10) ?? from;
   const countFrom = startedOn > from ? startedOn : from;
   const yesterday = addDays(today, -1);
   const countTo = yesterday < to ? yesterday : to;
-  const workDays = workingDaysBetween(countFrom, countTo, settings);
+  const workDays = await workingDaysBetween(countFrom, countTo, settings);
   const absent = workDays.filter((d) => !attended.has(d) && !excused.has(d));
 
   const workedMinutes = records.reduce((sum, r) => (r.check_in_at && r.check_out_at
@@ -160,7 +160,7 @@ export function monthSummary(userId, month) {
 
   return {
     month,
-    working_days: workingDaysBetween(from, to, settings).length,
+    working_days: (await workingDaysBetween(from, to, settings)).length,
     present_days: attended.size,
     late_days: records.filter((r) => r.late_minutes > 0).length,
     total_late_minutes: records.reduce((s, r) => s + r.late_minutes, 0),
@@ -171,48 +171,48 @@ export function monthSummary(userId, month) {
   };
 }
 
-export function history(userId, month) {
-  const settings = getSettings();
+export async function history(userId, month) {
+  const settings = await getSettings();
   const { from, to } = monthRange(month);
-  const records = all(`${RECORD_SELECT} WHERE a.user_id = ? AND a.work_date BETWEEN ? AND ? ORDER BY a.work_date DESC`, userId, from, to);
-  return { summary: monthSummary(userId, month), records: records.map((r) => present(r, settings.timezone)) };
+  const records = await all(`${RECORD_SELECT} WHERE a.user_id = ? AND a.work_date BETWEEN ? AND ? ORDER BY a.work_date DESC`, userId, from, to);
+  return { summary: await monthSummary(userId, month), records: records.map((r) => present(r, settings.timezone)) };
 }
 
 // ---- Admin ----
 
-export function listAttendance(viewer, { from, to, user_id, team_id, late_only } = {}) {
-  const settings = getSettings();
+export async function listAttendance(viewer, { from, to, user_id, team_id, late_only } = {}) {
+  const settings = await getSettings();
   const today = zonedParts(new Date(), settings.timezone).date;
   from = from ? assertDate(from, 'from') : today;
   to = to ? assertDate(to, 'to') : from;
-  const scope = scopeFilter(viewer, 'a.user_id');
+  const scope = await scopeFilter(viewer, 'a.user_id');
   const where = [scope.sql, 'a.work_date BETWEEN ? AND ?'];
   const params = [...scope.params, from, to];
   if (user_id) { where.push('a.user_id = ?'); params.push(Number(user_id)); }
   if (team_id) { where.push('u.team_id = ?'); params.push(Number(team_id)); }
   if (late_only === 'true') where.push('a.late_minutes > 0');
-  return all(`${RECORD_SELECT} WHERE ${where.join(' AND ')} ORDER BY a.work_date DESC, u.name LIMIT 5000`, ...params)
+  return (await all(`${RECORD_SELECT} WHERE ${where.join(' AND ')} ORDER BY a.work_date DESC, u.name LIMIT 5000`, ...params))
     .map((r) => present(r, settings.timezone));
 }
 
 /** One row per (scoped, active) employee describing their status for a date. */
-export function dailyBoard(viewer, date) {
-  const settings = getSettings();
+export async function dailyBoard(viewer, date) {
+  const settings = await getSettings();
   const today = zonedParts(new Date(), settings.timezone);
   date = date ? assertDate(date, 'date') : today.date;
-  const scope = scopeFilter(viewer, 'u.id');
-  const users = all(
+  const scope = await scopeFilter(viewer, 'u.id');
+  const users = await all(
     `SELECT u.id, u.name, u.employee_code, u.job_title, u.team_id, t.name AS team_name
      FROM users u LEFT JOIN teams t ON t.id = u.team_id
      WHERE u.is_active = 1 AND ${scope.sql} ORDER BY u.name`,
     ...scope.params,
   );
-  const workingDay = isWorkingDay(date, settings, holidaySet(date, date));
-  const recs = new Map(all(`${RECORD_SELECT} WHERE a.work_date = ?`, date).map((r) => [r.user_id, r]));
-  const onLeave = new Set(all(
+  const workingDay = isWorkingDay(date, settings, await holidaySet(date, date));
+  const recs = new Map((await all(`${RECORD_SELECT} WHERE a.work_date = ?`, date)).map((r) => [r.user_id, r]));
+  const onLeave = new Set((await all(
     `SELECT user_id FROM requests WHERE status = 'approved' AND type IN ('leave','mission') AND start_date <= ? AND end_date >= ?`,
     date, date,
-  ).map((r) => r.user_id));
+  )).map((r) => r.user_id));
   // Someone counts as absent once the grace period of that working day has passed without a check-in.
   const graceOver = date < today.date ||
     (date === today.date && today.minutes > timeToMinutes(settings.work_start) + Number(settings.late_grace_minutes));
@@ -231,11 +231,11 @@ export function dailyBoard(viewer, date) {
 }
 
 /** Manual correction by a manager. Times are wall-clock HH:MM in the company time zone. */
-export function upsertRecord(actor, body) {
+export async function upsertRecord(actor, body) {
   requireFields(body, ['user_id', 'work_date']);
-  const settings = getSettings();
+  const settings = await getSettings();
   const userId = Number(body.user_id);
-  if (!get('SELECT 1 FROM users WHERE id = ?', userId)) throw notFound('Employee');
+  if (!(await get('SELECT 1 AS ok FROM users WHERE id = ?', userId))) throw notFound('Employee');
   const date = assertDate(body.work_date, 'work_date');
   const inTime = body.check_in_time ? assertTime(body.check_in_time, 'check_in_time') : null;
   const outTime = body.check_out_time ? assertTime(body.check_out_time, 'check_out_time') : null;
@@ -243,17 +243,17 @@ export function upsertRecord(actor, body) {
   if (inTime && outTime && outTime <= inTime) throw badRequest('check_out_time must be after check_in_time');
 
   if (!inTime) {
-    run('DELETE FROM attendance WHERE user_id = ? AND work_date = ?', userId, date);
+    await run('DELETE FROM attendance WHERE user_id = ? AND work_date = ?', userId, date);
     return null;
   }
   const checkInAt = zonedToUtcIso(date, inTime, settings.timezone);
   const checkOutAt = outTime ? zonedToUtcIso(date, outTime, settings.timezone) : null;
-  run(
+  await run(
     `INSERT INTO attendance (user_id, work_date, check_in_at, check_out_at, late_minutes, note, edited_by)
      VALUES (?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(user_id, work_date) DO UPDATE SET check_in_at = excluded.check_in_at, check_out_at = excluded.check_out_at,
-       late_minutes = excluded.late_minutes, note = excluded.note, edited_by = excluded.edited_by`,
+     ON DUPLICATE KEY UPDATE check_in_at = VALUES(check_in_at), check_out_at = VALUES(check_out_at),
+       late_minutes = VALUES(late_minutes), note = VALUES(note), edited_by = VALUES(edited_by)`,
     userId, date, checkInAt, checkOutAt, lateMinutesFor(timeToMinutes(inTime), settings), body.note ?? null, actor.id,
   );
-  return present(get(`${RECORD_SELECT} WHERE a.user_id = ? AND a.work_date = ?`, userId, date), settings.timezone);
+  return present(await get(`${RECORD_SELECT} WHERE a.user_id = ? AND a.work_date = ?`, userId, date), settings.timezone);
 }

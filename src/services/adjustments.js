@@ -16,23 +16,23 @@ export function listAdjustments({ user_id, kind, from, to } = {}) {
   return all(`${SELECT} WHERE ${where.join(' AND ')} ORDER BY a.date DESC, a.id DESC`, ...params);
 }
 
-export function createAdjustment(actor, body) {
+export async function createAdjustment(actor, body) {
   requireFields(body, ['user_id', 'kind', 'reason', 'date']);
   const userId = Number(body.user_id);
-  if (!get('SELECT 1 FROM users WHERE id = ?', userId)) throw notFound('Employee');
+  if (!(await get('SELECT 1 AS ok FROM users WHERE id = ?', userId))) throw notFound('Employee');
   const kind = assertOneOf(body.kind, ['penalty', 'reward'], 'kind');
   const amount = assertNumber(body.amount ?? 0, 'amount', { min: 0 });
-  const { lastInsertRowid } = run(
+  const { lastInsertRowid } = await run(
     'INSERT INTO adjustments (user_id, kind, amount, reason, date, created_by) VALUES (?, ?, ?, ?, ?, ?)',
     userId, kind, amount, String(body.reason).trim(), assertDate(body.date, 'date'), actor.id,
   );
-  notify(userId, kind === 'reward' ? 'You received a reward' : 'A penalty was recorded', String(body.reason).trim());
-  return get(`${SELECT} WHERE a.id = ?`, Number(lastInsertRowid));
+  await notify(userId, kind === 'reward' ? 'You received a reward' : 'A penalty was recorded', String(body.reason).trim());
+  return get(`${SELECT} WHERE a.id = ?`, lastInsertRowid);
 }
 
-export function deleteAdjustment(id) {
-  if (!get('SELECT 1 FROM adjustments WHERE id = ?', id)) throw notFound('Penalty/reward');
-  run('DELETE FROM adjustments WHERE id = ?', id);
+export async function deleteAdjustment(id) {
+  if (!(await get('SELECT 1 AS ok FROM adjustments WHERE id = ?', id))) throw notFound('Penalty/reward');
+  await run('DELETE FROM adjustments WHERE id = ?', id);
 }
 
 export const ownAdjustments = (userId) =>

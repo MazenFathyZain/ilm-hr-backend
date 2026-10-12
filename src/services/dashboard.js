@@ -8,20 +8,20 @@ import { getSettings } from './settings.js';
 import { findUser } from './users.js';
 
 /** Everything the mobile home screen shows: profile card, monthly attendance card and the stats grid. */
-export function mobileDashboard(userId) {
-  const settings = getSettings();
+export async function mobileDashboard(userId) {
+  const settings = await getSettings();
   const today = zonedParts(new Date(), settings.timezone).date;
-  const user = findUser(userId);
+  const user = await findUser(userId);
   const year = today.slice(0, 4);
-  const counts = all("SELECT status, COUNT(*) AS n FROM requests WHERE user_id = ? AND created_at LIKE ? GROUP BY status", userId, `${year}-%`);
+  const counts = await all("SELECT status, COUNT(*) AS n FROM requests WHERE user_id = ? AND created_at LIKE ? GROUP BY status", userId, `${year}-%`);
   const n = (s) => counts.find((c) => c.status === s)?.n ?? 0;
   const total = counts.reduce((s, c) => s + c.n, 0);
-  const missionDays = get(
+  const missionDays = (await get(
     "SELECT COALESCE(SUM(days), 0) AS d FROM requests WHERE user_id = ? AND type = 'mission' AND status = 'approved' AND start_date LIKE ?",
     userId, `${year}-%`,
-  ).d;
-  const att = monthSummary(userId, today.slice(0, 7));
-  const status = todayStatus(userId);
+  )).d;
+  const att = await monthSummary(userId, today.slice(0, 7));
+  const status = await todayStatus(userId);
 
   return {
     profile: {
@@ -36,10 +36,10 @@ export function mobileDashboard(userId) {
     },
     attendance: { month: att.month, absence_days: att.absent_days, late_days: att.late_days, present_days: att.present_days },
     today: { date: status.date, can_check_in: status.can_check_in, can_check_out: status.can_check_out, record: status.record },
-    leave_balances: leaveBalances(userId, year),
+    leave_balances: await leaveBalances(userId, year),
     requests: { total, pending: n('pending'), approved: n('approved'), rejected: n('rejected') },
     missions: { approved_days: missionDays },
-    documents: documentSummary(userId),
+    documents: await documentSummary(userId),
     // Field names used by the app's existing DashboardData model.
     total_requests: total,
     pending_requests: n('pending'),
@@ -47,16 +47,16 @@ export function mobileDashboard(userId) {
   };
 }
 
-export function adminOverview(viewer) {
-  const settings = getSettings();
+export async function adminOverview(viewer) {
+  const settings = await getSettings();
   const today = zonedParts(new Date(), settings.timezone).date;
-  const scope = scopeFilter(viewer, 'u.id');
-  const employees = get(`SELECT COUNT(*) AS n FROM users u WHERE u.is_active = 1 AND ${scope.sql}`, ...scope.params).n;
-  const board = dailyBoard(viewer, today);
+  const scope = await scopeFilter(viewer, 'u.id');
+  const employees = (await get(`SELECT COUNT(*) AS n FROM users u WHERE u.is_active = 1 AND ${scope.sql}`, ...scope.params)).n;
+  const board = await dailyBoard(viewer, today);
 
   const from = addDays(today, -13);
-  const aScope = scopeFilter(viewer, 'a.user_id');
-  const trendRows = all(
+  const aScope = await scopeFilter(viewer, 'a.user_id');
+  const trendRows = await all(
     `SELECT a.work_date AS date, SUM(a.late_minutes = 0) AS on_time, SUM(a.late_minutes > 0) AS late
      FROM attendance a WHERE a.check_in_at IS NOT NULL AND a.work_date BETWEEN ? AND ? AND ${aScope.sql}
      GROUP BY a.work_date`,
@@ -71,12 +71,12 @@ export function adminOverview(viewer) {
   return {
     date: today,
     employees,
-    teams: viewer.role === 'manager' ? get('SELECT COUNT(*) AS n FROM teams').n : get('SELECT COUNT(*) AS n FROM teams WHERE leader_id = ?', viewer.id).n,
-    locations: get('SELECT COUNT(*) AS n FROM locations WHERE is_active = 1').n,
+    teams: viewer.role === 'manager' ? (await get('SELECT COUNT(*) AS n FROM teams')).n : (await get('SELECT COUNT(*) AS n FROM teams WHERE leader_id = ?', viewer.id)).n,
+    locations: (await get('SELECT COUNT(*) AS n FROM locations WHERE is_active = 1')).n,
     today: board.counts,
     is_working_day: board.is_working_day,
-    requests: requestStats(viewer),
-    pending_requests: listRequests(viewer, { status: 'pending' }).slice(0, 6),
+    requests: await requestStats(viewer),
+    pending_requests: (await listRequests(viewer, { status: 'pending' })).slice(0, 6),
     attendance_trend: trend,
   };
 }

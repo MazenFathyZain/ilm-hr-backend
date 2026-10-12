@@ -3,9 +3,9 @@ import { DEFAULT_SETTINGS } from '../db/index.js';
 import { badRequest } from '../utils/errors.js';
 import { assertDate, assertNumber, assertTime } from '../utils/validate.js';
 
-export function getSettings() {
+export async function getSettings() {
   const out = { ...DEFAULT_SETTINGS };
-  for (const row of all('SELECT key, value FROM settings')) out[row.key] = JSON.parse(row.value);
+  for (const row of await all('SELECT `key`, value FROM settings')) out[row.key] = JSON.parse(row.value);
   return out;
 }
 
@@ -31,15 +31,15 @@ const VALIDATORS = {
   currency: (v) => { if (typeof v !== 'string' || !v.trim()) throw badRequest('currency is required'); return v.trim(); },
 };
 
-export function updateSettings(patch) {
+export async function updateSettings(patch) {
   const clean = {};
   for (const [key, value] of Object.entries(patch ?? {})) {
     if (!VALIDATORS[key]) throw badRequest(`Unknown setting: ${key}`);
     clean[key] = VALIDATORS[key](value);
   }
-  tx(() => {
+  await tx(async () => {
     for (const [key, value] of Object.entries(clean)) {
-      run('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', key, JSON.stringify(value));
+      await run('INSERT INTO settings (`key`, value) VALUES (?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value)', key, JSON.stringify(value));
     }
   });
   return getSettings();
@@ -48,10 +48,10 @@ export function updateSettings(patch) {
 export const listHolidays = (year) =>
   year ? all("SELECT * FROM holidays WHERE date LIKE ? ORDER BY date", `${year}-%`) : all('SELECT * FROM holidays ORDER BY date');
 
-export function upsertHoliday({ date, name }) {
+export async function upsertHoliday({ date, name }) {
   assertDate(date, 'date');
   if (!name?.trim()) throw badRequest('name is required');
-  run('INSERT INTO holidays (date, name) VALUES (?, ?) ON CONFLICT(date) DO UPDATE SET name = excluded.name', date, name.trim());
+  await run('INSERT INTO holidays (date, name) VALUES (?, ?) ON DUPLICATE KEY UPDATE name = VALUES(name)', date, name.trim());
   return get('SELECT * FROM holidays WHERE date = ?', date);
 }
 

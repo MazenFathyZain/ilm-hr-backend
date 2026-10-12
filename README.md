@@ -1,12 +1,36 @@
-# HR API (Express + SQLite)
+# Ilm HR API (Express + MariaDB)
+
+## Setup
+
+1. **Create a database user.** You need a MariaDB 10.6+ or MySQL 8 server. The API creates the database and tables itself on first start.
+   ```sql
+   CREATE USER 'ilm_hr'@'localhost' IDENTIFIED BY 'a-strong-password';
+   GRANT ALL PRIVILEGES ON ilm_hr.* TO 'ilm_hr'@'localhost';
+   GRANT ALL PRIVILEGES ON ilm_hr_test.* TO 'ilm_hr'@'localhost';   -- only needed for `npm test`
+   ```
+2. **Configure and run.**
+   ```bash
+   npm install
+   cp .env.example .env   # set DB_HOST / DB_PORT / DB_USER / DB_PASSWORD / DB_NAME and JWT_SECRET
+   npm run dev            # http://localhost:4000 – creates the tables and seeds demo data on an empty database
+   npm test               # runs against a separate database: ilm_hr_test
+   npm run seed           # wipe & re-seed demo data
+   ```
+
+**API docs:** Swagger UI is at **`/api/docs`**, and the raw OpenAPI JSON is at `/api/docs.json`. Click *Authorize* and paste a token from one of the login endpoints. A test fails if any route is missing from the docs (`src/docs/openapi.js`).
+
+### Moving data from the old SQLite version
 
 ```bash
-npm install
-cp .env.example .env   # optional; set JWT_SECRET for production
-npm run dev            # http://localhost:4000, seeds demo data on an empty DB
-npm test
-npm run seed           # wipe & re-seed demo data
+SQLITE_FILE=./data/hr.sqlite npm run migrate:sqlite            # into an empty MariaDB database
+SQLITE_FILE=./data/hr.sqlite npm run migrate:sqlite -- --force # replace existing MariaDB data
 ```
+
+### Notes on the database
+
+- **Timestamps:** stored in UTC (`DATETIME(3)`) and returned as ISO strings (`2026-10-12T06:43:03.000Z`). Dates are returned as `YYYY-MM-DD`. Business rules use the company time zone from the settings.
+- **Encoding:** all tables use `utf8mb4`, so Arabic names are stored correctly.
+- **Transactions:** run through `tx()` in `src/db/index.js`. Any query made inside it uses the same connection automatically.
 
 Every response uses the envelope the Flutter app already models:
 `{ "status": 200, "message": "...", "data": ... }`. Errors look like `{ "status": 4xx, "message": "...", "code": "..." }`.
@@ -17,7 +41,8 @@ All routes except login need `Authorization: Bearer <token>`.
 ```
 src/
   app.js, server.js, config.js
-  db/        index.js (schema, query helpers), seed.js
+  db/        index.js (MariaDB pool, query helpers, tx), schema.js, seed.js, migrate-sqlite.js
+  docs/      openapi.js (Swagger / OpenAPI spec)
   middleware/auth.js (JWT, role guards), upload.js (multer)
   services/  business rules – access.js holds the manager / team-leader scoping
   routes/    mobile.js (/api/mobile), admin.js (/api/admin)

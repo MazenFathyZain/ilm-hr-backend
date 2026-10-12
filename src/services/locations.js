@@ -8,12 +8,12 @@ const SELECT = `
 
 const present = (l) => l && { ...l, is_active: !!l.is_active };
 
-export const listLocations = () => all(`${SELECT} ORDER BY l.name`).map(present);
+export const listLocations = async () => (await all(`${SELECT} ORDER BY l.name`)).map(present);
 
-export function findLocation(id) {
-  const loc = present(get(`${SELECT} WHERE l.id = ?`, id));
+export async function findLocation(id) {
+  const loc = present(await get(`${SELECT} WHERE l.id = ?`, id));
   if (!loc) throw notFound('Location');
-  loc.users = all(
+  loc.users = await all(
     'SELECT u.id, u.name, u.job_title FROM user_locations ul JOIN users u ON u.id = ul.user_id WHERE ul.location_id = ? ORDER BY u.name',
     id,
   );
@@ -30,38 +30,38 @@ function clean(input) {
   return patch;
 }
 
-function setUsers(locationId, userIds) {
-  run('DELETE FROM user_locations WHERE location_id = ?', locationId);
+async function setUsers(locationId, userIds) {
+  await run('DELETE FROM user_locations WHERE location_id = ?', locationId);
   for (const uid of new Set(userIds.map(Number))) {
-    run('INSERT OR IGNORE INTO user_locations (user_id, location_id) SELECT id, ? FROM users WHERE id = ?', locationId, uid);
+    await run('INSERT IGNORE INTO user_locations (user_id, location_id) SELECT id, ? FROM users WHERE id = ?', locationId, uid);
   }
 }
 
-export function createLocation(input) {
+export async function createLocation(input) {
   requireFields(input, ['name', 'latitude', 'longitude']);
   const data = { radius_meters: 100, ...clean(input) };
-  const id = tx(() => {
+  const id = await tx(async () => {
     const cols = Object.keys(data);
-    const { lastInsertRowid } = run(`INSERT INTO locations (${cols.join(', ')}) VALUES (${cols.map((c) => `:${c}`).join(', ')})`, data);
-    if (Array.isArray(input.user_ids)) setUsers(Number(lastInsertRowid), input.user_ids);
-    return Number(lastInsertRowid);
+    const { lastInsertRowid } = await run(`INSERT INTO locations (${cols.join(', ')}) VALUES (${cols.map((c) => `:${c}`).join(', ')})`, data);
+    if (Array.isArray(input.user_ids)) await setUsers(lastInsertRowid, input.user_ids);
+    return lastInsertRowid;
   });
   return findLocation(id);
 }
 
-export function updateLocation(id, input) {
-  if (!get('SELECT 1 FROM locations WHERE id = ?', id)) throw notFound('Location');
+export async function updateLocation(id, input) {
+  if (!(await get('SELECT 1 AS ok FROM locations WHERE id = ?', id))) throw notFound('Location');
   const patch = clean(input);
-  tx(() => {
-    if (Object.keys(patch).length) run(`UPDATE locations SET ${setClause(patch)} WHERE id = :id`, { ...patch, id });
-    if (Array.isArray(input.user_ids)) setUsers(id, input.user_ids);
+  await tx(async () => {
+    if (Object.keys(patch).length) await run(`UPDATE locations SET ${setClause(patch)} WHERE id = :id`, { ...patch, id });
+    if (Array.isArray(input.user_ids)) await setUsers(id, input.user_ids);
   });
   return findLocation(id);
 }
 
-export function deleteLocation(id) {
-  if (!get('SELECT 1 FROM locations WHERE id = ?', id)) throw notFound('Location');
-  run('DELETE FROM locations WHERE id = ?', id);
+export async function deleteLocation(id) {
+  if (!(await get('SELECT 1 AS ok FROM locations WHERE id = ?', id))) throw notFound('Location');
+  await run('DELETE FROM locations WHERE id = ?', id);
 }
 
 export const assignedLocations = (userId) =>

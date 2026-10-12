@@ -1,154 +1,7 @@
-import fs from 'node:fs';
-import path from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import mariadb from 'mariadb';
 import { config } from '../config.js';
-
-const SCHEMA = `
-CREATE TABLE IF NOT EXISTS settings (
-  key   TEXT PRIMARY KEY,
-  value TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS teams (
-  id          INTEGER PRIMARY KEY,
-  name        TEXT NOT NULL UNIQUE,
-  description TEXT,
-  leader_id   INTEGER REFERENCES users(id) ON DELETE SET NULL,
-  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS users (
-  id                   INTEGER PRIMARY KEY,
-  employee_code        TEXT UNIQUE,
-  name                 TEXT NOT NULL,
-  email                TEXT NOT NULL UNIQUE COLLATE NOCASE,
-  password_hash        TEXT NOT NULL,
-  national_id          TEXT,
-  phone                TEXT,
-  job_title            TEXT,
-  branch               TEXT,
-  role                 TEXT NOT NULL DEFAULT 'employee' CHECK (role IN ('manager','team_leader','employee')),
-  team_id              INTEGER REFERENCES teams(id) ON DELETE SET NULL,
-  hire_date            TEXT,
-  basic_salary         REAL NOT NULL DEFAULT 0,
-  annual_leave_balance INTEGER NOT NULL DEFAULT 21,
-  casual_leave_balance INTEGER NOT NULL DEFAULT 7,
-  is_active            INTEGER NOT NULL DEFAULT 1,
-  created_at           TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS locations (
-  id            INTEGER PRIMARY KEY,
-  name          TEXT NOT NULL,
-  address       TEXT,
-  latitude      REAL NOT NULL,
-  longitude     REAL NOT NULL,
-  radius_meters INTEGER NOT NULL DEFAULT 100,
-  is_active     INTEGER NOT NULL DEFAULT 1,
-  created_at    TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS user_locations (
-  user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  location_id INTEGER NOT NULL REFERENCES locations(id) ON DELETE CASCADE,
-  PRIMARY KEY (user_id, location_id)
-);
-
-CREATE TABLE IF NOT EXISTS attendance (
-  id                    INTEGER PRIMARY KEY,
-  user_id               INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  work_date             TEXT NOT NULL,
-  check_in_at           TEXT,
-  check_in_location_id  INTEGER REFERENCES locations(id) ON DELETE SET NULL,
-  check_in_lat          REAL,
-  check_in_lng          REAL,
-  check_out_at          TEXT,
-  check_out_location_id INTEGER REFERENCES locations(id) ON DELETE SET NULL,
-  check_out_lat         REAL,
-  check_out_lng         REAL,
-  late_minutes          INTEGER NOT NULL DEFAULT 0,
-  note                  TEXT,
-  edited_by             INTEGER REFERENCES users(id) ON DELETE SET NULL,
-  UNIQUE (user_id, work_date)
-);
-CREATE INDEX IF NOT EXISTS idx_attendance_date ON attendance(work_date);
-
-CREATE TABLE IF NOT EXISTS requests (
-  id          INTEGER PRIMARY KEY,
-  user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  type        TEXT NOT NULL CHECK (type IN ('leave','allowance','mission','early_leave','overtime','complaint')),
-  leave_type  TEXT CHECK (leave_type IN ('annual','casual','sick','unpaid')),
-  start_date  TEXT,
-  end_date    TEXT,
-  days        INTEGER,
-  start_time  TEXT,
-  end_time    TEXT,
-  hours       REAL,
-  amount      REAL,
-  destination TEXT,
-  reason      TEXT,
-  status      TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','rejected','cancelled')),
-  reviewer_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
-  review_note TEXT,
-  reviewed_at TEXT,
-  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
-);
-CREATE INDEX IF NOT EXISTS idx_requests_user ON requests(user_id, status);
-
-CREATE TABLE IF NOT EXISTS adjustments (
-  id         INTEGER PRIMARY KEY,
-  user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  kind       TEXT NOT NULL CHECK (kind IN ('penalty','reward')),
-  amount     REAL NOT NULL DEFAULT 0,
-  reason     TEXT NOT NULL,
-  date       TEXT NOT NULL,
-  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS payslips (
-  id               INTEGER PRIMARY KEY,
-  user_id          INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  month            TEXT NOT NULL,
-  basic_salary     REAL NOT NULL DEFAULT 0,
-  earnings         TEXT NOT NULL DEFAULT '{}',
-  deductions       TEXT NOT NULL DEFAULT '{}',
-  total_earnings   REAL NOT NULL DEFAULT 0,
-  total_deductions REAL NOT NULL DEFAULT 0,
-  net_salary       REAL NOT NULL DEFAULT 0,
-  status           TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','published')),
-  updated_at       TEXT NOT NULL DEFAULT (datetime('now')),
-  UNIQUE (user_id, month)
-);
-
-CREATE TABLE IF NOT EXISTS documents (
-  id            INTEGER PRIMARY KEY,
-  user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  title         TEXT NOT NULL,
-  status        TEXT NOT NULL DEFAULT 'missing' CHECK (status IN ('missing','submitted','approved','rejected')),
-  file_path     TEXT,
-  original_name TEXT,
-  mime_type     TEXT,
-  note          TEXT,
-  updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
-  UNIQUE (user_id, title)
-);
-
-CREATE TABLE IF NOT EXISTS notifications (
-  id         INTEGER PRIMARY KEY,
-  user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  title      TEXT NOT NULL,
-  body       TEXT,
-  is_read    INTEGER NOT NULL DEFAULT 0,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, is_read);
-
-CREATE TABLE IF NOT EXISTS holidays (
-  date TEXT PRIMARY KEY,
-  name TEXT NOT NULL
-);
-`;
+import { SCHEMA } from './schema.js';
 
 export const DEFAULT_SETTINGS = {
   company_name: 'علم لإحياء التراث والخدمات الرقمية',
@@ -164,51 +17,122 @@ export const DEFAULT_SETTINGS = {
   currency: 'EGP',
 };
 
-function open(file) {
-  if (file !== ':memory:') fs.mkdirSync(path.dirname(file), { recursive: true });
-  const database = new DatabaseSync(file);
-  database.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
-  database.exec(SCHEMA);
-  const insert = database.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)');
-  for (const [key, value] of Object.entries(DEFAULT_SETTINGS)) insert.run(key, JSON.stringify(value));
-  return database;
+// Return DATE columns as 'YYYY-MM-DD' and DATETIME columns as UTC ISO strings ('…Z'),
+// which is what the services (and API clients) work with.
+function typeCast(column, next) {
+  if (column.type === 'DATE' || column.type === 'NEWDATE') return column.string();
+  if (column.type === 'DATETIME' || column.type === 'TIMESTAMP' || column.type === 'DATETIME2' || column.type === 'TIMESTAMP2') {
+    const s = column.string();
+    if (!s) return null;
+    const [d, t = '00:00:00'] = s.split(' ');
+    const [hms, ms = '0'] = t.split('.');
+    return `${d}T${hms}.${ms.padEnd(3, '0').slice(0, 3)}Z`;
+  }
+  return next();
 }
 
-export const db = open(config.dbFile);
-
-// node:sqlite rejects `undefined` and booleans as parameters; normalise them.
-const norm = (v) => (v === undefined ? null : typeof v === 'boolean' ? Number(v) : v);
-const normArgs = (args) =>
-  args.map((a) => (a && typeof a === 'object' && !Array.isArray(a)
-    ? Object.fromEntries(Object.entries(a).map(([k, v]) => [k, norm(v)]))
-    : norm(a)));
-
-const cache = new Map();
-const stmt = (sql) => {
-  let s = cache.get(sql);
-  if (!s) cache.set(sql, (s = db.prepare(sql)));
-  return s;
+const connectionOptions = {
+  host: config.db.host,
+  port: config.db.port,
+  user: config.db.user,
+  password: config.db.password,
+  charset: 'utf8mb4',
+  // Plain JS numbers for COUNT/SUM/DECIMAL/insert ids (values in this app are well within 2^53).
+  bigIntAsNumber: true,
+  decimalAsNumber: true,
+  insertIdAsNumber: true,
+  // Store and read every timestamp in UTC; business rules convert to the company time zone.
+  timezone: 'Z',
+  initSql: "SET time_zone = '+00:00'",
+  typeCast,
 };
 
-export const get = (sql, ...args) => stmt(sql).get(...normArgs(args));
-export const all = (sql, ...args) => stmt(sql).all(...normArgs(args));
-export const run = (sql, ...args) => stmt(sql).run(...normArgs(args));
+let pool = null;
+const txStore = new AsyncLocalStorage();
 
-let depth = 0;
-/** Runs fn inside a transaction (nested calls join the outer one). */
-export function tx(fn) {
-  if (depth > 0) return fn();
-  depth++;
-  db.exec('BEGIN IMMEDIATE');
+/** Creates the database (if missing) and tables, then seeds default settings. */
+export async function initDb() {
+  if (pool) return;
+  const bootstrap = await mariadb.createConnection({ ...connectionOptions });
   try {
-    const result = fn();
-    db.exec('COMMIT');
+    await bootstrap.query(`CREATE DATABASE IF NOT EXISTS \`${config.db.name}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`);
+  } finally {
+    await bootstrap.end();
+  }
+  pool = mariadb.createPool({ ...connectionOptions, database: config.db.name, connectionLimit: config.db.connectionLimit });
+
+  for (const statement of SCHEMA) await pool.query(statement);
+  const fk = await pool.query(
+    `SELECT 1 FROM information_schema.TABLE_CONSTRAINTS
+     WHERE CONSTRAINT_SCHEMA = ? AND TABLE_NAME = 'users' AND CONSTRAINT_NAME = 'fk_users_team'`,
+    [config.db.name],
+  );
+  if (!fk.length) {
+    await pool.query('ALTER TABLE users ADD CONSTRAINT fk_users_team FOREIGN KEY (team_id) REFERENCES teams(id) ON DELETE SET NULL');
+  }
+  for (const [key, value] of Object.entries(DEFAULT_SETTINGS)) {
+    await pool.query('INSERT IGNORE INTO settings (`key`, value) VALUES (?, ?)', [key, JSON.stringify(value)]);
+  }
+}
+
+export async function closeDb() {
+  if (pool) await pool.end();
+  pool = null;
+}
+
+const ISO_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/;
+
+// Normalise parameters: undefined → NULL, booleans → 0/1, ISO UTC strings → DATETIME literals.
+function norm(v) {
+  if (v === undefined) return null;
+  if (typeof v === 'boolean') return v ? 1 : 0;
+  if (typeof v === 'string' && ISO_UTC.test(v)) return v.replace('T', ' ').replace('Z', '');
+  return v;
+}
+
+async function query(sql, args) {
+  if (!pool) throw new Error('Database not initialised – call initDb() first');
+  const executor = txStore.getStore() ?? pool;
+  const single = args.length === 1 && args[0] && typeof args[0] === 'object' && !Array.isArray(args[0]);
+  if (single) {
+    // Named placeholders (`:name`) when a single object is passed.
+    const named = Object.fromEntries(Object.entries(args[0]).map(([k, v]) => [k, norm(v)]));
+    return executor.query({ sql, namedPlaceholders: true }, named);
+  }
+  return executor.query(sql, args.map(norm));
+}
+
+/** First row or undefined. */
+export async function get(sql, ...args) {
+  const rows = await query(sql, args);
+  return rows[0];
+}
+
+/** All rows as plain objects. */
+export async function all(sql, ...args) {
+  return [...(await query(sql, args))];
+}
+
+/** INSERT / UPDATE / DELETE. Returns { lastInsertRowid, changes }. */
+export async function run(sql, ...args) {
+  const res = await query(sql, args);
+  return { lastInsertRowid: Number(res.insertId ?? 0), changes: Number(res.affectedRows ?? 0) };
+}
+
+/** Runs fn inside a transaction; every query made inside it (even in nested calls) uses the same connection. */
+export async function tx(fn) {
+  if (txStore.getStore()) return fn();
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const result = await txStore.run(conn, fn);
+    await conn.commit();
     return result;
   } catch (err) {
-    db.exec('ROLLBACK');
+    await conn.rollback().catch(() => {});
     throw err;
   } finally {
-    depth--;
+    conn.release();
   }
 }
 

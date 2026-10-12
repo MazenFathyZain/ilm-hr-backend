@@ -24,16 +24,16 @@ const SELECT = `
   LEFT JOIN teams t ON t.id = u.team_id
   LEFT JOIN users rv ON rv.id = r.reviewer_id`;
 
-export function findRequest(id) {
-  const r = get(`${SELECT} WHERE r.id = ?`, id);
+export async function findRequest(id) {
+  const r = await get(`${SELECT} WHERE r.id = ?`, id);
   if (!r) throw notFound('Request');
   return r;
 }
 
 /** Leave entitlement vs. usage for a calendar year. Pending requests reserve days too. */
-export function leaveBalances(userId, year) {
-  const user = get('SELECT annual_leave_balance, casual_leave_balance FROM users WHERE id = ?', userId);
-  const rows = all(
+export async function leaveBalances(userId, year) {
+  const user = await get('SELECT annual_leave_balance, casual_leave_balance FROM users WHERE id = ?', userId);
+  const rows = await all(
     `SELECT leave_type, status, SUM(days) AS days FROM requests
      WHERE user_id = ? AND type = 'leave' AND status IN ('approved','pending') AND start_date LIKE ?
      GROUP BY leave_type, status`,
@@ -54,8 +54,8 @@ export function leaveBalances(userId, year) {
   };
 }
 
-function assertNoOverlap(userId, start, end, exceptId = 0) {
-  const clash = get(
+async function assertNoOverlap(userId, start, end, exceptId = 0) {
+  const clash = await get(
     `SELECT id, type FROM requests WHERE user_id = ? AND id <> ? AND status IN ('pending','approved')
        AND type IN ('leave','mission') AND start_date <= ? AND end_date >= ?`,
     userId, exceptId, end, start,
@@ -63,10 +63,10 @@ function assertNoOverlap(userId, start, end, exceptId = 0) {
   if (clash) throw conflict(`These dates overlap with request #${clash.id}`, 'overlapping_request');
 }
 
-function buildRequest(userId, body) {
+async function buildRequest(userId, body) {
   requireFields(body, ['type']);
   const type = assertOneOf(body.type, REQUEST_TYPES, 'type');
-  const settings = getSettings();
+  const settings = await getSettings();
   const reason = typeof body.reason === 'string' ? body.reason.trim() : null;
   const r = { user_id: userId, type, reason: reason || null };
 
@@ -77,7 +77,7 @@ function buildRequest(userId, body) {
       r.start_date = assertDate(body.start_date, 'start_date');
       r.end_date = assertDate(body.end_date, 'end_date');
       if (r.end_date < r.start_date) throw badRequest('end_date must be on or after start_date');
-      r.days = workingDaysBetween(r.start_date, r.end_date, settings).length;
+      r.days = (await workingDaysBetween(r.start_date, r.end_date, settings)).length;
       if (r.days === 0) throw badRequest('The selected period contains no working days');
       if (type === 'leave') r.leave_type = assertOneOf(body.leave_type ?? 'annual', LEAVE_TYPES, 'leave_type');
       else {
@@ -109,9 +109,9 @@ function buildRequest(userId, body) {
   return r;
 }
 
-function assertBalance(userId, req, { excludingPendingOf } = {}) {
+async function assertBalance(userId, req, { excludingPendingOf } = {}) {
   if (req.type !== 'leave' || !['annual', 'casual'].includes(req.leave_type)) return;
-  const bal = leaveBalances(userId, req.start_date.slice(0, 4))[req.leave_type];
+  const bal = (await leaveBalances(userId, req.start_date.slice(0, 4)))[req.leave_type];
   // When approving, this request's own days are already counted as pending.
   const available = bal.remaining + (excludingPendingOf ? req.days : 0);
   if (req.days > available) {
@@ -122,22 +122,22 @@ function assertBalance(userId, req, { excludingPendingOf } = {}) {
   }
 }
 
-export function createRequest(userId, body) {
-  const data = buildRequest(userId, body);
-  if (data.type === 'leave' || data.type === 'mission') assertNoOverlap(userId, data.start_date, data.end_date);
-  assertBalance(userId, data);
+export async function createRequest(userId, body) {
+  const data = await buildRequest(userId, body);
+  if (data.type === 'leave' || data.type === 'mission') await assertNoOverlap(userId, data.start_date, data.end_date);
+  await assertBalance(userId, data);
   const cols = Object.keys(data);
-  const { lastInsertRowid } = run(`INSERT INTO requests (${cols.join(', ')}) VALUES (${cols.map((c) => `:${c}`).join(', ')})`, data);
-  const created = findRequest(Number(lastInsertRowid));
-  notifyReviewers(created);
+  const { lastInsertRowid } = await run(`INSERT INTO requests (${cols.join(', ')}) VALUES (${cols.map((c) => `:${c}`).join(', ')})`, data);
+  const created = await findRequest(lastInsertRowid);
+  await notifyReviewers(created);
   return created;
 }
 
 /** Team leader of the requester (if any), otherwise all managers. */
-function notifyReviewers(r) {
-  const leader = get('SELECT t.leader_id FROM users u JOIN teams t ON t.id = u.team_id WHERE u.id = ? AND t.leader_id <> u.id', r.user_id)?.leader_id;
-  const reviewers = leader ? [leader] : all("SELECT id FROM users WHERE role = 'manager' AND is_active = 1 AND id <> ?", r.user_id).map((m) => m.id);
-  for (const id of reviewers) notify(id, `New ${TYPE_LABELS[r.type].toLowerCase()}`, `${r.user_name} submitted request #${r.id}.`);
+async function notifyReviewers(r) {
+  const leader = (await get('SELECT t.leader_id FROM users u JOIN teams t ON t.id = u.team_id WHERE u.id = ? AND t.leader_id <> u.id', r.user_id))?.leader_id;
+  const reviewers = leader ? [leader] : (await all("SELECT id FROM users WHERE role = 'manager' AND is_active = 1 AND id <> ?", r.user_id)).map((m) => m.id);
+  for (const id of reviewers) await notify(id, `New ${TYPE_LABELS[r.type].toLowerCase()}`, `${r.user_name} submitted request #${r.id}.`);
 }
 
 export function listOwnRequests(userId, { status, type } = {}) {
@@ -149,16 +149,16 @@ export function listOwnRequests(userId, { status, type } = {}) {
   return all(`${SELECT} WHERE ${where.join(' AND ')} ORDER BY r.created_at DESC, r.id DESC`, ...params);
 }
 
-export function cancelOwnRequest(userId, id) {
-  const r = findRequest(id);
+export async function cancelOwnRequest(userId, id) {
+  const r = await findRequest(id);
   if (r.user_id !== userId) throw notFound('Request');
   if (r.status !== 'pending') throw conflict('Only pending requests can be cancelled');
-  run("UPDATE requests SET status = 'cancelled' WHERE id = ?", id);
+  await run("UPDATE requests SET status = 'cancelled' WHERE id = ?", id);
   return findRequest(id);
 }
 
-export function listRequests(viewer, { status, type, user_id, team_id, from, to } = {}) {
-  const scope = scopeFilter(viewer, 'r.user_id');
+export async function listRequests(viewer, { status, type, user_id, team_id, from, to } = {}) {
+  const scope = await scopeFilter(viewer, 'r.user_id');
   const where = [scope.sql];
   const params = [...scope.params];
   if (status) { where.push('r.status = ?'); params.push(assertOneOf(status, STATUSES, 'status')); }
@@ -172,18 +172,20 @@ export function listRequests(viewer, { status, type, user_id, team_id, from, to 
 
 export function reviewRequest(actor, id, decision, note) {
   assertOneOf(decision, ['approved', 'rejected'], 'decision');
-  return tx(() => {
-    const r = findRequest(id);
+  return tx(async () => {
+    // Lock the row so two reviewers can't decide the same request at once.
+    await get('SELECT id FROM requests WHERE id = ? FOR UPDATE', id);
+    const r = await findRequest(id);
     if (r.user_id === actor.id) throw forbidden('You cannot review your own request');
-    assertCanSupervise(actor, r.user_id);
+    await assertCanSupervise(actor, r.user_id);
     if (r.status !== 'pending') throw conflict(`This request is already ${r.status}`);
-    if (decision === 'approved') assertBalance(r.user_id, r, { excludingPendingOf: true });
+    if (decision === 'approved') await assertBalance(r.user_id, r, { excludingPendingOf: true });
 
-    run(
+    await run(
       'UPDATE requests SET status = ?, reviewer_id = ?, review_note = ?, reviewed_at = ? WHERE id = ?',
       decision, actor.id, note?.trim() || null, new Date().toISOString(), id,
     );
-    notify(
+    await notify(
       r.user_id,
       `${TYPE_LABELS[r.type]} ${decision}`,
       `Your request #${r.id} was ${decision} by ${actor.name}${note ? `: ${note}` : '.'}`,
@@ -192,11 +194,11 @@ export function reviewRequest(actor, id, decision, note) {
   });
 }
 
-export function requestStats(viewer) {
-  const scope = scopeFilter(viewer, 'r.user_id');
-  const year = zonedParts(new Date(), getSettings().timezone).date.slice(0, 4);
-  return all(
+export async function requestStats(viewer) {
+  const scope = await scopeFilter(viewer, 'r.user_id');
+  const year = zonedParts(new Date(), (await getSettings()).timezone).date.slice(0, 4);
+  return (await all(
     `SELECT r.status, COUNT(*) AS n FROM requests r WHERE ${scope.sql} AND r.created_at LIKE ? GROUP BY r.status`,
     ...scope.params, `${year}-%`,
-  ).reduce((acc, row) => ({ ...acc, [row.status]: row.n }), { pending: 0, approved: 0, rejected: 0, cancelled: 0 });
+  )).reduce((acc, row) => ({ ...acc, [row.status]: row.n }), { pending: 0, approved: 0, rejected: 0, cancelled: 0 });
 }

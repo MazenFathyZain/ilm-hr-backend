@@ -8,7 +8,7 @@ export function signToken(user) {
 }
 
 /** Verifies the bearer token and loads the *current* user, so role/deactivation changes apply immediately. */
-export function authenticate(req, _res, next) {
+export async function authenticate(req, _res, next) {
   const header = req.headers.authorization ?? '';
   const token = header.startsWith('Bearer ') ? header.slice(7) : null;
   if (!token) return next(unauthorized());
@@ -20,10 +20,14 @@ export function authenticate(req, _res, next) {
     return next(unauthorized('Session expired or invalid, please log in again'));
   }
 
-  const user = get('SELECT id, name, email, role, team_id, is_active FROM users WHERE id = ?', payload.sub);
-  if (!user || !user.is_active) return next(unauthorized('Account is disabled'));
-  req.user = user;
-  next();
+  try {
+    const user = await get('SELECT id, name, email, role, team_id, is_active FROM users WHERE id = ?', payload.sub);
+    if (!user || !user.is_active) return next(unauthorized('Account is disabled'));
+    req.user = user;
+    next();
+  } catch (err) {
+    next(err);
+  }
 }
 
 export const requireRole = (...roles) => (req, _res, next) =>

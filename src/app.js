@@ -1,7 +1,9 @@
 import cors from 'cors';
 import express from 'express';
 import multer from 'multer';
+import swaggerUi from 'swagger-ui-express';
 import { config } from './config.js';
+import { openApiSpec } from './docs/openapi.js';
 import adminRoutes from './routes/admin.js';
 import mobileRoutes from './routes/mobile.js';
 import { HttpError } from './utils/errors.js';
@@ -13,6 +15,11 @@ export function createApp() {
   app.use(express.json({ limit: '1mb' }));
 
   app.get('/api/health', (_req, res) => res.json({ status: 200, message: 'OK' }));
+  app.get('/api/docs.json', (_req, res) => res.json(openApiSpec));
+  app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(openApiSpec, {
+    customSiteTitle: 'Ilm HR API',
+    swaggerOptions: { persistAuthorization: true, docExpansion: 'none', filter: true, tagsSorter: 'alpha' },
+  }));
   app.use('/api/mobile', mobileRoutes);
   app.use('/api/admin', adminRoutes);
 

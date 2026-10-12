@@ -39,8 +39,8 @@ function authPayload(user) {
 }
 
 function login(allowedRoles) {
-  return (req, res) => {
-    const user = verifyCredentials(req.body?.email, req.body?.password);
+  return async (req, res) => {
+    const user = await verifyCredentials(req.body?.email, req.body?.password);
     if (!user) throw unauthorized('Invalid email or password');
     if (!user.is_active) throw unauthorized('Account is disabled');
     if (!allowedRoles.includes(user.role)) throw forbidden('This account cannot sign in as a manager');
@@ -54,79 +54,79 @@ router.post('/managers/login', login(['team_leader', 'manager']));
 
 router.use(authenticate);
 
-router.post(['/employees/logout', '/managers/logout'], (_req, res) => ok(res, null, 'Logged out'));
+router.post(['/employees/logout', '/managers/logout'], async (_req, res) => ok(res, null, 'Logged out'));
 
 // ---- Profile ----
-router.get('/employees/profile/get-user', (req, res) => {
-  const u = findUser(req.user.id, req.user);
+router.get('/employees/profile/get-user', async (req, res) => {
+  const u = await findUser(req.user.id, req.user);
   ok(res, { ...u, national_id: nationalIdNumber(u.national_id), type: userType(u.role) }, 'Profile loaded');
 });
 
-router.patch('/employees/profile/update', (req, res) => {
-  const u = updateOwnProfile(req.user.id, req.body);
+router.patch('/employees/profile/update', async (req, res) => {
+  const u = await updateOwnProfile(req.user.id, req.body);
   ok(res, { id: u.id, name: u.name, email: u.email, national_id: u.national_id ?? '' }, 'Profile updated');
 });
 
-router.patch('/employees/profile/update-password', (req, res) => {
-  changeOwnPassword(req.user.id, req.body ?? {});
+router.patch('/employees/profile/update-password', async (req, res) => {
+  await changeOwnPassword(req.user.id, req.body ?? {});
   ok(res, null, 'Password updated');
 });
 
 // ---- Home ----
-router.get('/employees/dashboard', (req, res) => ok(res, mobileDashboard(req.user.id)));
+router.get('/employees/dashboard', async (req, res) => ok(res, await mobileDashboard(req.user.id)));
 
-router.get('/settings', (_req, res) => {
-  const s = getSettings();
+router.get('/settings', async (_req, res) => {
+  const s = await getSettings();
   ok(res, { company_name: s.company_name, timezone: s.timezone, work_start: s.work_start, work_end: s.work_end, currency: s.currency });
 });
 
 // ---- Attendance (check-in / check-out replaces face detection) ----
-router.get('/attendance/today', (req, res) => ok(res, todayStatus(req.user.id)));
-router.post('/attendance/check-in', (req, res) => ok(res, checkIn(req.user.id, req.body), 'Checked in successfully'));
-router.post('/attendance/check-out', (req, res) => ok(res, checkOut(req.user.id, req.body), 'Checked out successfully'));
-router.get('/attendance/history', (req, res) => {
-  const month = req.query.month ? assertMonth(req.query.month) : currentMonth(getSettings().timezone);
-  ok(res, history(req.user.id, month));
+router.get('/attendance/today', async (req, res) => ok(res, await todayStatus(req.user.id)));
+router.post('/attendance/check-in', async (req, res) => ok(res, await checkIn(req.user.id, req.body), 'Checked in successfully'));
+router.post('/attendance/check-out', async (req, res) => ok(res, await checkOut(req.user.id, req.body), 'Checked out successfully'));
+router.get('/attendance/history', async (req, res) => {
+  const month = req.query.month ? assertMonth(req.query.month) : currentMonth((await getSettings()).timezone);
+  ok(res, await history(req.user.id, month));
 });
 
 // ---- Requests ----
-router.get('/requests', (req, res) => ok(res, listOwnRequests(req.user.id, req.query)));
-router.post('/requests', (req, res) => created(res, createRequest(req.user.id, req.body ?? {}), 'Request submitted'));
-router.get('/requests/leave-balance', (req, res) => {
-  const year = zonedParts(new Date(), getSettings().timezone).date.slice(0, 4);
-  ok(res, leaveBalances(req.user.id, req.query.year ?? year));
+router.get('/requests', async (req, res) => ok(res, await listOwnRequests(req.user.id, req.query)));
+router.post('/requests', async (req, res) => created(res, await createRequest(req.user.id, req.body ?? {}), 'Request submitted'));
+router.get('/requests/leave-balance', async (req, res) => {
+  const year = zonedParts(new Date(), (await getSettings()).timezone).date.slice(0, 4);
+  ok(res, await leaveBalances(req.user.id, req.query.year ?? year));
 });
-router.get('/requests/:id', (req, res) => {
-  const r = findRequest(toId(req.params.id));
+router.get('/requests/:id', async (req, res) => {
+  const r = await findRequest(toId(req.params.id));
   if (r.user_id !== req.user.id) throw notFound('Request');
   ok(res, r);
 });
-router.delete('/requests/:id', (req, res) => ok(res, cancelOwnRequest(req.user.id, toId(req.params.id)), 'Request cancelled'));
+router.delete('/requests/:id', async (req, res) => ok(res, await cancelOwnRequest(req.user.id, toId(req.params.id)), 'Request cancelled'));
 
 // ---- Salary ----
-router.get('/salary', (req, res) => ok(res, ownPayslip(req.user.id, req.query.month)));
+router.get('/salary', async (req, res) => ok(res, await ownPayslip(req.user.id, req.query.month)));
 
 // ---- Profile extras ----
-router.get('/penalties-rewards', (req, res) => ok(res, ownAdjustments(req.user.id)));
-router.get('/documents', (req, res) => ok(res, ownDocuments(req.user.id)));
-router.post('/documents/:id/upload', upload.single('file'), (req, res) =>
-  ok(res, uploadOwnDocument(req.user.id, toId(req.params.id), req.file), 'Document uploaded'));
-router.get('/documents/:id/file', (req, res) => {
-  const f = documentFile(toId(req.params.id));
+router.get('/penalties-rewards', async (req, res) => ok(res, await ownAdjustments(req.user.id)));
+router.get('/documents', async (req, res) => ok(res, await ownDocuments(req.user.id)));
+router.post('/documents/:id/upload', upload.single('file'), async (req, res) =>
+  ok(res, await uploadOwnDocument(req.user.id, toId(req.params.id), req.file), 'Document uploaded'));
+router.get('/documents/:id/file', async (req, res) => {
+  const f = await documentFile(toId(req.params.id));
   if (f.userId !== req.user.id || !fs.existsSync(f.absPath)) throw notFound('File');
   res.download(f.absPath, f.name);
 });
 
-router.get('/notifications', (req, res) => ok(res, listNotifications(req.user.id)));
-router.patch('/notifications/read-all', (req, res) => { markAllRead(req.user.id); ok(res, null); });
-router.patch('/notifications/:id/read', (req, res) => { markRead(req.user.id, toId(req.params.id)); ok(res, null); });
+router.get('/notifications', async (req, res) => ok(res, await listNotifications(req.user.id)));
+router.patch('/notifications/read-all', async (req, res) => { await markAllRead(req.user.id); ok(res, null); });
+router.patch('/notifications/:id/read', async (req, res) => { await markRead(req.user.id, toId(req.params.id)); ok(res, null); });
 
 // ---- Team leaders / managers on mobile ----
-router.get('/team/requests', leadersAndManagers, (req, res) => ok(res, listRequests(req.user, { status: req.query.status ?? 'pending', type: req.query.type })));
-router.patch('/team/requests/:id/approve', leadersAndManagers, (req, res) =>
-  ok(res, reviewRequest(req.user, toId(req.params.id), 'approved', req.body?.note), 'Request approved'));
-router.patch('/team/requests/:id/reject', leadersAndManagers, (req, res) =>
-  ok(res, reviewRequest(req.user, toId(req.params.id), 'rejected', req.body?.note), 'Request rejected'));
-router.get('/team/attendance', leadersAndManagers, (req, res) => ok(res, dailyBoard(req.user, req.query.date)));
+router.get('/team/requests', leadersAndManagers, async (req, res) => ok(res, await listRequests(req.user, { status: req.query.status ?? 'pending', type: req.query.type })));
+router.patch('/team/requests/:id/approve', leadersAndManagers, async (req, res) =>
+  ok(res, await reviewRequest(req.user, toId(req.params.id), 'approved', req.body?.note), 'Request approved'));
+router.patch('/team/requests/:id/reject', leadersAndManagers, async (req, res) =>
+  ok(res, await reviewRequest(req.user, toId(req.params.id), 'rejected', req.body?.note), 'Request rejected'));
+router.get('/team/attendance', leadersAndManagers, async (req, res) => ok(res, await dailyBoard(req.user, req.query.date)));
 
 export default router;
