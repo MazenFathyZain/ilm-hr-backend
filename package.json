@@ -1,0 +1,24 @@
+{
+  "name": "meshkat-hr-backend",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Express + SQLite API for the Meshkat Nour HR mobile app and admin dashboard.",
+  "scripts": {
+    "dev": "node --watch src/server.js",
+    "start": "node src/server.js",
+    "seed": "node src/db/seed.js --reset",
+    "test": "node --test test/"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "cors": "^2.8.6",
+    "dotenv": "^18.0.7",
+    "express": "^5.3.0",
+    "jsonwebtoken": "^9.0.3",
+    "multer": "^2.4.0"
+  }
+}
