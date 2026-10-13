@@ -97,7 +97,7 @@ export async function savePayslip(body) {
        net_salary = VALUES(net_salary), status = VALUES(status), updated_at = VALUES(updated_at)`,
     userId, month, basic, JSON.stringify(earnings), JSON.stringify(deductions), totalE, totalD, round2(basic + totalE - totalD), status,
   );
-  if (status === 'published' && before?.status !== 'published') await notify(userId, 'Payslip available', `Your payslip for ${month} has been published.`);
+  if (status === 'published' && before?.status !== 'published') await notify(userId, 'payslip_published', { month }, { month });
   return present(await get(`${SELECT} WHERE p.user_id = ? AND p.month = ?`, userId, month));
 }
 
@@ -115,7 +115,7 @@ export async function publishMonth(month) {
   await tx(async () => {
     for (const d of drafts) {
       await run("UPDATE payslips SET status = 'published', updated_at = UTC_TIMESTAMP(3) WHERE id = ?", d.id);
-      await notify(d.user_id, 'Payslip available', `Your payslip for ${d.month} has been published.`);
+      await notify(d.user_id, 'payslip_published', { month: d.month }, { month: d.month });
     }
   });
   return { published: drafts.length };
@@ -128,11 +128,19 @@ export async function deletePayslip(id) {
 
 // ---- Employee ----
 
+/** Only the line items that apply to this payslip (non-zero), in display order. */
+const nonZeroItems = (items, keys) => keys.filter((k) => Number(items?.[k]) > 0).map((key) => ({ key, amount: Number(items[key]) }));
+
 export async function ownPayslip(userId, month) {
   if (month) assertMonth(month);
   const row = month
     ? await get("SELECT * FROM payslips WHERE user_id = ? AND month = ? AND status = 'published'", userId, month)
     : await get("SELECT * FROM payslips WHERE user_id = ? AND status = 'published' ORDER BY month DESC LIMIT 1", userId);
   const months = (await all("SELECT month FROM payslips WHERE user_id = ? AND status = 'published' ORDER BY month DESC", userId)).map((r) => r.month);
-  return { payslip: present(row), available_months: months };
+  const payslip = present(row);
+  if (payslip) {
+    payslip.earnings_items = nonZeroItems(payslip.earnings, EARNING_KEYS);
+    payslip.deductions_items = nonZeroItems(payslip.deductions, DEDUCTION_KEYS);
+  }
+  return { payslip, available_months: months };
 }

@@ -2,6 +2,7 @@ import { all, get, run, tx } from '../db/index.js';
 import { badRequest, conflict, forbidden, notFound, unprocessable } from '../utils/errors.js';
 import { zonedParts } from '../utils/time.js';
 import { assertDate, assertNumber, assertOneOf, assertTime, requireFields } from '../utils/validate.js';
+import { avatarUrl } from '../utils/files.js';
 import { assertCanSupervise, scopeFilter } from './access.js';
 import { workingDaysBetween } from './calendar.js';
 import { notify } from './notifications.js';
@@ -11,23 +12,24 @@ export const REQUEST_TYPES = ['leave', 'allowance', 'mission', 'early_leave', 'o
 export const LEAVE_TYPES = ['annual', 'casual', 'sick', 'unpaid'];
 export const STATUSES = ['pending', 'approved', 'rejected', 'cancelled'];
 
-const TYPE_LABELS = {
-  leave: 'Leave request', allowance: 'Allowance request', mission: 'Mission request',
-  early_leave: 'Early leave permission', overtime: 'Overtime request', complaint: 'Complaint',
-};
-
 const SELECT = `
-  SELECT r.*, u.name AS user_name, u.employee_code, u.job_title, u.team_id, t.name AS team_name,
+  SELECT r.*, u.name AS user_name, u.employee_code, u.job_title, u.team_id, u.avatar_path AS user_avatar_path, t.name AS team_name,
          rv.name AS reviewer_name
   FROM requests r
   JOIN users u ON u.id = r.user_id
   LEFT JOIN teams t ON t.id = u.team_id
   LEFT JOIN users rv ON rv.id = r.reviewer_id`;
 
+function present(r) {
+  if (!r) return r;
+  const { user_avatar_path: avatarPath, ...rest } = r;
+  return { ...rest, user_avatar_url: avatarUrl(avatarPath) };
+}
+
 export async function findRequest(id) {
   const r = await get(`${SELECT} WHERE r.id = ?`, id);
   if (!r) throw notFound('Request');
-  return r;
+  return present(r);
 }
 
 /** Leave entitlement vs. usage for a calendar year. Pending requests reserve days too. */
@@ -137,16 +139,16 @@ export async function createRequest(userId, body) {
 async function notifyReviewers(r) {
   const leader = (await get('SELECT t.leader_id FROM users u JOIN teams t ON t.id = u.team_id WHERE u.id = ? AND t.leader_id <> u.id', r.user_id))?.leader_id;
   const reviewers = leader ? [leader] : (await all("SELECT id FROM users WHERE role = 'manager' AND is_active = 1 AND id <> ?", r.user_id)).map((m) => m.id);
-  for (const id of reviewers) await notify(id, `New ${TYPE_LABELS[r.type].toLowerCase()}`, `${r.user_name} submitted request #${r.id}.`);
+  for (const id of reviewers) await notify(id, 'request_submitted', { type: r.type, name: r.user_name, id: r.id }, { request_id: r.id });
 }
 
-export function listOwnRequests(userId, { status, type } = {}) {
+export async function listOwnRequests(userId, { status, type } = {}) {
   const where = ['r.user_id = ?'];
   const params = [userId];
   if (status === 'previous') where.push("r.status <> 'pending'");
   else if (status) { where.push('r.status = ?'); params.push(assertOneOf(status, STATUSES, 'status')); }
   if (type) { where.push('r.type = ?'); params.push(assertOneOf(type, REQUEST_TYPES, 'type')); }
-  return all(`${SELECT} WHERE ${where.join(' AND ')} ORDER BY r.created_at DESC, r.id DESC`, ...params);
+  return (await all(`${SELECT} WHERE ${where.join(' AND ')} ORDER BY r.created_at DESC, r.id DESC`, ...params)).map(present);
 }
 
 export async function cancelOwnRequest(userId, id) {
@@ -167,7 +169,7 @@ export async function listRequests(viewer, { status, type, user_id, team_id, fro
   if (team_id) { where.push('u.team_id = ?'); params.push(Number(team_id)); }
   if (from) { where.push('date(r.created_at) >= ?'); params.push(assertDate(from, 'from')); }
   if (to) { where.push('date(r.created_at) <= ?'); params.push(assertDate(to, 'to')); }
-  return all(`${SELECT} WHERE ${where.join(' AND ')} ORDER BY r.status = 'pending' DESC, r.created_at DESC, r.id DESC LIMIT 2000`, ...params);
+  return (await all(`${SELECT} WHERE ${where.join(' AND ')} ORDER BY r.status = 'pending' DESC, r.created_at DESC, r.id DESC LIMIT 2000`, ...params)).map(present);
 }
 
 export function reviewRequest(actor, id, decision, note) {
@@ -185,11 +187,7 @@ export function reviewRequest(actor, id, decision, note) {
       'UPDATE requests SET status = ?, reviewer_id = ?, review_note = ?, reviewed_at = ? WHERE id = ?',
       decision, actor.id, note?.trim() || null, new Date().toISOString(), id,
     );
-    await notify(
-      r.user_id,
-      `${TYPE_LABELS[r.type]} ${decision}`,
-      `Your request #${r.id} was ${decision} by ${actor.name}${note ? `: ${note}` : '.'}`,
-    );
+    await notify(r.user_id, 'request_decided', { type: r.type, decision, reviewer: actor.name, id: r.id, note: note?.trim() || null }, { request_id: r.id });
     return findRequest(id);
   });
 }

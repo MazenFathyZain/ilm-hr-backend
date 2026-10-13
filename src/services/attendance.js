@@ -1,16 +1,20 @@
-import { all, get, run } from '../db/index.js';
+import { all, get, run, tx } from '../db/index.js';
 import { badRequest, conflict, notFound, unprocessable } from '../utils/errors.js';
 import { distanceMeters } from '../utils/geo.js';
 import { addDays, monthRange, timeToMinutes, zonedParts, zonedToUtcIso } from '../utils/time.js';
 import { assertDate, assertNumber, assertTime, requireFields } from '../utils/validate.js';
+import { avatarUrl } from '../utils/files.js';
 import { scopeFilter } from './access.js';
 import { holidaySet, isWorkingDay, workingDaysBetween } from './calendar.js';
 import { assignedLocations } from './locations.js';
+import { notify } from './notifications.js';
 import { getSettings } from './settings.js';
 
 const RECORD_SELECT = `
-  SELECT a.*, u.name AS user_name, u.employee_code, u.team_id, t.name AS team_name,
-         li.name AS check_in_location, lo.name AS check_out_location
+  SELECT a.*, u.name AS user_name, u.employee_code, u.team_id, u.avatar_path, t.name AS team_name,
+         li.name AS check_in_location, lo.name AS check_out_location,
+         (SELECT COALESCE(SUM(TIMESTAMPDIFF(SECOND, b.left_at, b.returned_at)), 0)
+            FROM attendance_breaks b WHERE b.attendance_id = a.id AND b.returned_at IS NOT NULL) AS away_seconds
   FROM attendance a
   JOIN users u ON u.id = a.user_id
   LEFT JOIN teams t ON t.id = u.team_id
@@ -20,14 +24,19 @@ const RECORD_SELECT = `
 function present(rec, tz) {
   if (!rec) return null;
   const local = (iso) => (iso ? zonedParts(new Date(iso), tz).time : null);
+  const away = Math.round(Number(rec.away_seconds ?? 0) / 60);
   const worked = rec.check_in_at && rec.check_out_at
-    ? Math.max(0, Math.round((Date.parse(rec.check_out_at) - Date.parse(rec.check_in_at)) / 60000))
+    ? Math.max(0, Math.round((Date.parse(rec.check_out_at) - Date.parse(rec.check_in_at)) / 60000) - away)
     : null;
+  const { avatar_path: avatarPath, away_seconds: _away, ...rest } = rec;
   return {
-    ...rec,
+    ...rest,
+    user_avatar_url: avatarUrl(avatarPath),
     check_in_time: local(rec.check_in_at),
     check_out_time: local(rec.check_out_at),
     is_late: rec.late_minutes > 0,
+    left_location: rec.check_out_method === 'left_location',
+    away_minutes: away,
     worked_minutes: worked,
   };
 }
@@ -80,8 +89,11 @@ export async function todayStatus(userId) {
     work_end: settings.work_end,
     is_working_day: isWorkingDay(now.date, settings, await holidaySet(now.date, now.date)),
     record: present(record, settings.timezone),
-    can_check_in: !record?.check_in_at,
+    // After an automatic check-out (left the location) the employee may check in again when back.
+    can_check_in: !record?.check_in_at || record.check_out_method === 'left_location',
     can_check_out: !!record?.check_in_at && !record?.check_out_at,
+    checked_out_automatically: record?.check_out_method === 'left_location',
+    auto_checkout_on_leave: settings.auto_checkout_on_leave,
     locations: await assignedLocations(userId),
   };
 }
@@ -91,9 +103,21 @@ export async function checkIn(userId, body) {
   const now = new Date();
   const local = zonedParts(now, settings.timezone);
   const existing = await get('SELECT * FROM attendance WHERE user_id = ? AND work_date = ?', userId, local.date);
-  if (existing?.check_in_at) throw conflict('You have already checked in today', 'already_checked_in');
+  const returning = existing?.check_in_at && existing.check_out_method === 'left_location';
+  if (existing?.check_in_at && !returning) throw conflict('You have already checked in today', 'already_checked_in');
 
   const { location, lat, lng } = await resolveLocation(userId, body);
+  if (returning) {
+    // Back after leaving: reopen the day and close the break.
+    await tx(async () => {
+      await run(
+        'UPDATE attendance SET check_out_at = NULL, check_out_location_id = NULL, check_out_lat = NULL, check_out_lng = NULL, check_out_method = NULL, last_ping_at = ? WHERE id = ?',
+        now.toISOString(), existing.id,
+      );
+      await run('UPDATE attendance_breaks SET returned_at = ? WHERE attendance_id = ? AND returned_at IS NULL', now.toISOString(), existing.id);
+    });
+    return todayStatus(userId);
+  }
   const late = lateMinutesFor(local.minutes, settings);
   await run(
     `INSERT INTO attendance (user_id, work_date, check_in_at, check_in_location_id, check_in_lat, check_in_lng, late_minutes)
@@ -116,10 +140,59 @@ export async function checkOut(userId, body) {
 
   const { location, lat, lng } = await resolveLocation(userId, body);
   await run(
-    'UPDATE attendance SET check_out_at = ?, check_out_location_id = ?, check_out_lat = ?, check_out_lng = ? WHERE id = ?',
+    "UPDATE attendance SET check_out_at = ?, check_out_location_id = ?, check_out_lat = ?, check_out_lng = ?, check_out_method = 'manual' WHERE id = ?",
     now.toISOString(), location.id, lat, lng, existing.id,
   );
   return todayStatus(userId);
+}
+
+/**
+ * Called by the app while the employee is checked in. If the reported position is clearly outside every
+ * assigned location (distance minus GPS accuracy is still beyond the radius), the employee is checked out
+ * automatically at that moment and a break is opened; checking in again on return closes it.
+ */
+export async function locationPing(userId, body) {
+  const settings = await getSettings();
+  if (!settings.auto_checkout_on_leave) return { tracking: false };
+  requireFields(body, ['latitude', 'longitude']);
+  const lat = assertNumber(body.latitude, 'latitude', { min: -90, max: 90 });
+  const lng = assertNumber(body.longitude, 'longitude', { min: -180, max: 180 });
+  // Poor fixes are not trusted: the uncertainty is capped so a wild reading can't hide a real departure forever.
+  const accuracy = Math.min(Math.max(Number(body.accuracy) || 0, 0), 100);
+
+  const now = new Date();
+  const local = zonedParts(now, settings.timezone);
+  const record = await get('SELECT * FROM attendance WHERE user_id = ? AND work_date = ?', userId, local.date);
+  if (!record?.check_in_at || record.check_out_at) return { tracking: true, checked_in: false };
+  if (body.is_mocked === true) return { tracking: true, checked_in: true, ignored: 'mock_location' };
+
+  const locations = await assignedLocations(userId);
+  const ranked = locations
+    .map((l) => ({ ...l, distance: Math.round(distanceMeters(lat, lng, l.latitude, l.longitude)) }))
+    .sort((a, b) => a.distance - b.distance);
+  const nearest = ranked[0];
+  const clearlyOutside = !nearest || ranked.every((l) => l.distance - accuracy > l.radius_meters);
+
+  if (!clearlyOutside) {
+    await run('UPDATE attendance SET last_ping_at = ? WHERE id = ?', now.toISOString(), record.id);
+    return { tracking: true, checked_in: true, inside: nearest.distance <= nearest.radius_meters, distance_meters: nearest.distance, location: nearest.name };
+  }
+
+  await tx(async () => {
+    await run(
+      "UPDATE attendance SET check_out_at = ?, check_out_lat = ?, check_out_lng = ?, check_out_method = 'left_location', last_ping_at = ? WHERE id = ? AND check_out_at IS NULL",
+      now.toISOString(), lat, lng, now.toISOString(), record.id,
+    );
+    await run('INSERT INTO attendance_breaks (attendance_id, left_at, left_lat, left_lng) VALUES (?, ?, ?, ?)', record.id, now.toISOString(), lat, lng);
+  });
+  await notify(userId, 'auto_checkout', { time: local.time, location: nearest?.name }, { attendance_id: record.id });
+  const leader = await get(
+    'SELECT t.leader_id, u.name FROM users u JOIN teams t ON t.id = u.team_id WHERE u.id = ? AND t.leader_id IS NOT NULL AND t.leader_id <> u.id',
+    userId,
+  );
+  if (leader) await notify(leader.leader_id, 'team_member_left', { name: leader.name, time: local.time }, { user_id: userId });
+
+  return { tracking: true, checked_in: false, auto_checked_out: true, status: await todayStatus(userId) };
 }
 
 /** Dates covered by approved leave or missions for a user in a range. */
@@ -202,7 +275,7 @@ export async function dailyBoard(viewer, date) {
   date = date ? assertDate(date, 'date') : today.date;
   const scope = await scopeFilter(viewer, 'u.id');
   const users = await all(
-    `SELECT u.id, u.name, u.employee_code, u.job_title, u.team_id, t.name AS team_name
+    `SELECT u.id, u.name, u.employee_code, u.job_title, u.team_id, u.avatar_path, t.name AS team_name
      FROM users u LEFT JOIN teams t ON t.id = u.team_id
      WHERE u.is_active = 1 AND ${scope.sql} ORDER BY u.name`,
     ...scope.params,
@@ -224,7 +297,8 @@ export async function dailyBoard(viewer, date) {
     else if (onLeave.has(u.id)) status = 'on_leave';
     else if (!workingDay) status = 'day_off';
     else status = graceOver ? 'absent' : 'not_yet';
-    return { ...u, status, record: rec };
+    const { avatar_path: avatarPath, ...user } = u;
+    return { ...user, avatar_url: avatarUrl(avatarPath), status, record: rec };
   });
   const counts = rows.reduce((acc, r) => ({ ...acc, [r.status]: (acc[r.status] ?? 0) + 1 }), {});
   return { date, is_working_day: workingDay, counts, rows };
@@ -249,11 +323,11 @@ export async function upsertRecord(actor, body) {
   const checkInAt = zonedToUtcIso(date, inTime, settings.timezone);
   const checkOutAt = outTime ? zonedToUtcIso(date, outTime, settings.timezone) : null;
   await run(
-    `INSERT INTO attendance (user_id, work_date, check_in_at, check_out_at, late_minutes, note, edited_by)
-     VALUES (?, ?, ?, ?, ?, ?, ?)
-     ON DUPLICATE KEY UPDATE check_in_at = VALUES(check_in_at), check_out_at = VALUES(check_out_at),
+    `INSERT INTO attendance (user_id, work_date, check_in_at, check_out_at, check_out_method, late_minutes, note, edited_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE check_in_at = VALUES(check_in_at), check_out_at = VALUES(check_out_at), check_out_method = VALUES(check_out_method),
        late_minutes = VALUES(late_minutes), note = VALUES(note), edited_by = VALUES(edited_by)`,
-    userId, date, checkInAt, checkOutAt, lateMinutesFor(timeToMinutes(inTime), settings), body.note ?? null, actor.id,
+    userId, date, checkInAt, checkOutAt, checkOutAt ? 'admin' : null, lateMinutesFor(timeToMinutes(inTime), settings), body.note ?? null, actor.id,
   );
   return present(await get(`${RECORD_SELECT} WHERE a.user_id = ? AND a.work_date = ?`, userId, date), settings.timezone);
 }

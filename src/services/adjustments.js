@@ -26,7 +26,7 @@ export async function createAdjustment(actor, body) {
     'INSERT INTO adjustments (user_id, kind, amount, reason, date, created_by) VALUES (?, ?, ?, ?, ?, ?)',
     userId, kind, amount, String(body.reason).trim(), assertDate(body.date, 'date'), actor.id,
   );
-  await notify(userId, kind === 'reward' ? 'You received a reward' : 'A penalty was recorded', String(body.reason).trim());
+  await notify(userId, kind, { reason: String(body.reason).trim() }, { adjustment_id: lastInsertRowid });
   return get(`${SELECT} WHERE a.id = ?`, lastInsertRowid);
 }
 

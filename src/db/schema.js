@@ -27,6 +27,7 @@ export const SCHEMA = [
     annual_leave_balance SMALLINT UNSIGNED NOT NULL DEFAULT 21,
     casual_leave_balance SMALLINT UNSIGNED NOT NULL DEFAULT 7,
     is_active            TINYINT(1) NOT NULL DEFAULT 1,
+    avatar_path          VARCHAR(255) NULL,
     created_at           DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     KEY idx_users_team (team_id)
   ) ${TABLE_OPTS}`,
@@ -74,6 +75,8 @@ export const SCHEMA = [
     check_out_lat         DOUBLE NULL,
     check_out_lng         DOUBLE NULL,
     late_minutes          INT UNSIGNED NOT NULL DEFAULT 0,
+    check_out_method      ENUM('manual','left_location','admin') NULL,
+    last_ping_at          DATETIME(3) NULL,
     note                  VARCHAR(500) NULL,
     edited_by             INT UNSIGNED NULL,
     UNIQUE KEY uq_attendance_user_date (user_id, work_date),
@@ -82,6 +85,19 @@ export const SCHEMA = [
     CONSTRAINT fk_att_in_loc FOREIGN KEY (check_in_location_id) REFERENCES locations(id) ON DELETE SET NULL,
     CONSTRAINT fk_att_out_loc FOREIGN KEY (check_out_location_id) REFERENCES locations(id) ON DELETE SET NULL,
     CONSTRAINT fk_att_editor FOREIGN KEY (edited_by) REFERENCES users(id) ON DELETE SET NULL
+  ) ${TABLE_OPTS}`,
+
+  // Time an employee spent outside their assigned locations after checking in
+  // (they are checked out automatically when they leave and can check in again when they return).
+  `CREATE TABLE IF NOT EXISTS attendance_breaks (
+    id            INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    attendance_id INT UNSIGNED NOT NULL,
+    left_at       DATETIME(3) NOT NULL,
+    returned_at   DATETIME(3) NULL,
+    left_lat      DOUBLE NULL,
+    left_lng      DOUBLE NULL,
+    KEY idx_breaks_attendance (attendance_id),
+    CONSTRAINT fk_break_attendance FOREIGN KEY (attendance_id) REFERENCES attendance(id) ON DELETE CASCADE
   ) ${TABLE_OPTS}`,
 
   `CREATE TABLE IF NOT EXISTS requests (
@@ -162,12 +178,34 @@ export const SCHEMA = [
     CONSTRAINT fk_notif_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
   ) ${TABLE_OPTS}`,
 
+  // Firebase Cloud Messaging tokens – one row per installed app.
+  `CREATE TABLE IF NOT EXISTS device_tokens (
+    id         INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    user_id    INT UNSIGNED NOT NULL,
+    token      VARCHAR(255) NOT NULL UNIQUE,
+    platform   ENUM('android','ios','web') NOT NULL,
+    created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    KEY idx_device_tokens_user (user_id),
+    CONSTRAINT fk_device_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  ) ${TABLE_OPTS}`,
+
   `CREATE TABLE IF NOT EXISTS holidays (
     date DATE NOT NULL PRIMARY KEY,
     name VARCHAR(150) NOT NULL
   ) ${TABLE_OPTS}`,
 ];
 
+/** Columns added after the first MariaDB release – applied to existing databases by initDb(). */
+export const MIGRATIONS = [
+  'ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_path VARCHAR(255) NULL AFTER is_active',
+  "ALTER TABLE attendance ADD COLUMN IF NOT EXISTS check_out_method ENUM('manual','left_location','admin') NULL AFTER late_minutes",
+  'ALTER TABLE attendance ADD COLUMN IF NOT EXISTS last_ping_at DATETIME(3) NULL AFTER check_out_method',
+  "ALTER TABLE users ADD COLUMN IF NOT EXISTS locale ENUM('ar','en') NOT NULL DEFAULT 'ar' AFTER avatar_path",
+  'ALTER TABLE notifications ADD COLUMN IF NOT EXISTS type VARCHAR(40) NULL AFTER user_id',
+  'ALTER TABLE notifications ADD COLUMN IF NOT EXISTS data TEXT NULL AFTER body',
+];
+
 /** Tables in an order that is safe for deleting/copying with FK checks on. */
-export const TABLES = ['settings', 'holidays', 'users', 'teams', 'locations', 'user_locations', 'attendance', 'requests',
-  'adjustments', 'payslips', 'documents', 'notifications'];
+export const TABLES = ['settings', 'holidays', 'users', 'teams', 'locations', 'user_locations', 'attendance', 'attendance_breaks', 'requests',
+  'adjustments', 'payslips', 'documents', 'notifications', 'device_tokens'];

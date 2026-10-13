@@ -1,4 +1,7 @@
 node_modules
+node_modules.nosync
 data/
 uploads/
 .env
+secrets/
+*firebase-adminsdk*.json

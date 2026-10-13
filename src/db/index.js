@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import mariadb from 'mariadb';
 import { config } from '../config.js';
-import { SCHEMA } from './schema.js';
+import { MIGRATIONS, SCHEMA } from './schema.js';
 
 export const DEFAULT_SETTINGS = {
   company_name: 'علم لإحياء التراث والخدمات الرقمية',
@@ -15,6 +15,8 @@ export const DEFAULT_SETTINGS = {
   default_casual_leave: 7,
   required_documents: ['National ID copy', 'Birth certificate', 'Graduation certificate', 'Military status certificate', 'Criminal record', 'Personal photos'],
   currency: 'EGP',
+  // Check the employee out automatically when the app reports they left all of their assigned locations.
+  auto_checkout_on_leave: true,
 };
 
 // Return DATE columns as 'YYYY-MM-DD' and DATETIME columns as UTC ISO strings ('…Z'),
@@ -62,6 +64,7 @@ export async function initDb() {
   pool = mariadb.createPool({ ...connectionOptions, database: config.db.name, connectionLimit: config.db.connectionLimit });
 
   for (const statement of SCHEMA) await pool.query(statement);
+  for (const statement of MIGRATIONS) await pool.query(statement);
   const fk = await pool.query(
     `SELECT 1 FROM information_schema.TABLE_CONSTRAINTS
      WHERE CONSTRAINT_SCHEMA = ? AND TABLE_NAME = 'users' AND CONSTRAINT_NAME = 'fk_users_team'`,

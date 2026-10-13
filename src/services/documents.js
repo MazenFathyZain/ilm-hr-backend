@@ -60,7 +60,7 @@ export async function reviewDocument(id, { status, note }) {
   const doc = await get('SELECT * FROM documents WHERE id = ?', id);
   if (!doc) throw notFound('Document');
   await run("UPDATE documents SET status = ?, note = ?, updated_at = UTC_TIMESTAMP(3) WHERE id = ?", status, note ?? null, id);
-  if (status !== 'missing') await notify(doc.user_id, `Document ${status}`, `${doc.title}${note ? `: ${note}` : ''}`);
+  if (status !== 'missing') await notify(doc.user_id, 'document_reviewed', { title: doc.title, status, note }, { document_id: id });
   return present(await get(`${SELECT} WHERE d.id = ?`, id));
 }
 

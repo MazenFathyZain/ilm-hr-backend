@@ -1,5 +1,6 @@
 import { all, get, run, setClause, tx } from '../db/index.js';
 import { badRequest, conflict, forbidden, notFound } from '../utils/errors.js';
+import { avatarUrl } from '../utils/files.js';
 import { pick, requireFields } from '../utils/validate.js';
 import { isManager } from './access.js';
 
@@ -9,8 +10,8 @@ const SELECT = `
   FROM teams t LEFT JOIN users l ON l.id = t.leader_id`;
 
 const members = async (teamId) =>
-  (await all('SELECT id, name, email, job_title, role, is_active FROM users WHERE team_id = ? ORDER BY name', teamId))
-    .map((m) => ({ ...m, is_active: !!m.is_active }));
+  (await all('SELECT id, name, email, job_title, role, is_active, avatar_path FROM users WHERE team_id = ? ORDER BY name', teamId))
+    .map(({ avatar_path: avatarPath, ...m }) => ({ ...m, avatar_url: avatarUrl(avatarPath), is_active: !!m.is_active }));
 
 export function listTeams(viewer) {
   return isManager(viewer)

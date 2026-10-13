@@ -91,6 +91,7 @@ export const openApiSpec = {
           role: { type: 'string', enum: ['manager', 'team_leader', 'employee'] }, team_id: { type: 'integer', nullable: true },
           team_name: { type: 'string', nullable: true }, supervisor_id: { type: 'integer', nullable: true }, supervisor_name: { type: 'string', nullable: true },
           hire_date: { type: 'string', format: 'date' }, basic_salary: { type: 'number', description: 'Only visible to managers and the user themselves' },
+          avatar_url: { type: 'string', nullable: true, description: 'Relative to the API origin unless PUBLIC_URL is set' },
           annual_leave_balance: { type: 'integer' }, casual_leave_balance: { type: 'integer' }, is_active: { type: 'boolean' },
           locations: { type: 'array', items: { type: 'object', properties: { id: { type: 'integer' }, name: { type: 'string' } } } },
         },
@@ -140,7 +141,8 @@ export const openApiSpec = {
           check_in_at: { type: 'string', format: 'date-time' }, check_out_at: { type: 'string', format: 'date-time', nullable: true },
           check_in_time: { type: 'string', example: '08:57', description: 'Company time zone' }, check_out_time: { type: 'string', nullable: true },
           check_in_location: { type: 'string' }, check_out_location: { type: 'string', nullable: true },
-          late_minutes: { type: 'integer' }, is_late: { type: 'boolean' }, worked_minutes: { type: 'integer', nullable: true }, note: { type: 'string', nullable: true },
+          late_minutes: { type: 'integer' }, is_late: { type: 'boolean' }, worked_minutes: { type: 'integer', nullable: true, description: 'Time away (breaks) excluded' }, note: { type: 'string', nullable: true },
+          check_out_method: { type: 'string', enum: ['manual', 'left_location', 'admin'], nullable: true }, left_location: { type: 'boolean' }, away_minutes: { type: 'integer' },
         },
       },
       TodayStatus: {
@@ -148,6 +150,7 @@ export const openApiSpec = {
         properties: {
           date: { type: 'string', format: 'date' }, server_time: { type: 'string' }, work_start: { type: 'string' }, work_end: { type: 'string' },
           is_working_day: { type: 'boolean' }, can_check_in: { type: 'boolean' }, can_check_out: { type: 'boolean' },
+          checked_out_automatically: { type: 'boolean' }, auto_checkout_on_leave: { type: 'boolean', description: 'When true the app should send location pings while checked in' },
           record: { allOf: [ref('AttendanceRecord')], nullable: true }, locations: listOf('Location'),
         },
       },
@@ -191,6 +194,8 @@ export const openApiSpec = {
           earnings: { type: 'object', additionalProperties: { type: 'number' } }, deductions: { type: 'object', additionalProperties: { type: 'number' } },
           total_earnings: { type: 'number' }, total_deductions: { type: 'number' }, net_salary: { type: 'number' },
           status: { type: 'string', enum: ['draft', 'published'] },
+          earnings_items: { type: 'array', description: 'Mobile only: non-zero earnings', items: { type: 'object', properties: { key: { type: 'string' }, amount: { type: 'number' } } } },
+          deductions_items: { type: 'array', description: 'Mobile only: non-zero deductions', items: { type: 'object', properties: { key: { type: 'string' }, amount: { type: 'number' } } } },
         },
       },
       PayslipInput: {
@@ -220,7 +225,7 @@ export const openApiSpec = {
           company_name: { type: 'string' }, timezone: { type: 'string', example: 'Africa/Cairo' }, work_start: { type: 'string', example: '09:00' },
           work_end: { type: 'string', example: '17:00' }, late_grace_minutes: { type: 'integer' }, weekend_days: { type: 'array', items: { type: 'integer' }, example: [5, 6] },
           default_annual_leave: { type: 'integer' }, default_casual_leave: { type: 'integer' }, required_documents: { type: 'array', items: { type: 'string' } },
-          currency: { type: 'string' },
+          currency: { type: 'string' }, auto_checkout_on_leave: { type: 'boolean' },
         },
       },
     },
@@ -245,6 +250,13 @@ export const openApiSpec = {
     '/api/mobile/employees/profile/update-password': {
       patch: op(M, 'Change own password', { requestBody: body({ type: 'object', required: ['current_password', 'password'], properties: { current_password: { type: 'string' }, password: { type: 'string' }, password_confirmation: { type: 'string' } } }) }),
     },
+    '/api/mobile/employees/profile/avatar': {
+      post: op(M, 'Upload / replace own profile photo (JPEG, PNG, WebP, HEIC; max 5 MB)', {
+        requestBody: { required: true, content: { 'multipart/form-data': { schema: { type: 'object', properties: { avatar: { type: 'string', format: 'binary' } } } } } },
+        response: ok(ref('User')),
+      }),
+      delete: op(M, 'Remove own profile photo', { response: ok(ref('User')) }),
+    },
     '/api/mobile/employees/dashboard': { get: op(M, 'Home screen: profile card, monthly attendance, leave balances, request counts') },
     '/api/mobile/settings': { get: op(M, 'Company name, time zone and working hours') },
     '/api/mobile/attendance/today': { get: op(M, "Today's check-in status and the user's assigned locations", { response: ok(ref('TodayStatus')) }) },
@@ -255,6 +267,12 @@ export const openApiSpec = {
       }),
     },
     '/api/mobile/attendance/check-out': { post: op(M, 'Check out at one of the assigned locations', { requestBody: body(position), response: ok(ref('TodayStatus')), errs: [400, 401, 409, 422] }) },
+    '/api/mobile/attendance/location-ping': {
+      post: op(M, 'Report position while checked in (automatic check-out when leaving)', {
+        requestBody: body(position),
+        extra: { description: 'Sent by the app while the employee is checked in. If the position is clearly outside every assigned location (distance − accuracy > radius), the employee is checked out at once (`auto_checked_out: true`) and may check in again on return; the time away is recorded as a break. Disabled when the setting `auto_checkout_on_leave` is false.' },
+      }),
+    },
     '/api/mobile/attendance/history': { get: op(M, 'Monthly attendance records and summary', { params: [q('month', { type: 'string', example: '2026-10' })] }) },
     '/api/mobile/requests': {
       get: op(M, 'Own requests', { params: [q('status', { type: 'string', enum: ['pending', 'approved', 'rejected', 'cancelled', 'previous'] }), q('type')], response: ok(listOf('Request')) }),
@@ -275,7 +293,14 @@ export const openApiSpec = {
       }),
     },
     '/api/mobile/documents/{id}/file': { get: op(M, 'Download own document file', { params: [idParam()], response: { description: 'File' }, errs: [401, 404] }) },
-    '/api/mobile/notifications': { get: op(M, 'Notifications') },
+    '/api/mobile/devices': {
+      post: op(M, 'Register this phone for push notifications (Firebase Cloud Messaging)', {
+        requestBody: body({ type: 'object', required: ['token', 'platform'], properties: { token: { type: 'string', description: 'FCM registration token' }, platform: { type: 'string', enum: ['android', 'ios', 'web'] }, locale: { type: 'string', enum: ['ar', 'en'], description: 'Language for notification texts' } } }),
+        extra: { description: 'Call after login and whenever the FCM token or app language changes. Notifications are then also delivered as push notifications (shown even when the app is closed). Push data contains `type` (request_submitted, request_decided, payslip_published, reward, penalty, document_reviewed, auto_checkout, team_member_left), `notification_id` and an id such as `request_id`.' },
+      }),
+      delete: op(M, 'Unregister this phone (call on logout)', { requestBody: body({ type: 'object', required: ['token'], properties: { token: { type: 'string' } } }) }),
+    },
+    '/api/mobile/notifications': { get: op(M, 'Notifications (localized title/body, type and data for navigation)') },
     '/api/mobile/notifications/read-all': { patch: op(M, 'Mark all notifications read') },
     '/api/mobile/notifications/{id}/read': { patch: op(M, 'Mark one notification read', { params: [idParam()] }) },
     '/api/mobile/team/requests': { get: op(`${M} – Team`, "Team's requests (default: pending)", { params: [q('status'), q('type')], response: ok(listOf('Request')) }) },
@@ -298,6 +323,13 @@ export const openApiSpec = {
       get: op(A, 'Employee with leave balances', { params: [idParam(), q('year')], response: ok(ref('User')), errs: [401, 403, 404] }),
       patch: op(A, 'Update employee (manager)', { params: [idParam()], requestBody: body(ref('UserInput')), response: ok(ref('User')), errs: [400, 401, 403, 404, 409] }),
       delete: op(A, 'Deactivate employee (manager)', { params: [idParam()], errs: [400, 401, 403, 404] }),
+    },
+    '/api/admin/users/{id}/avatar': {
+      post: op(A, "Upload / replace an employee's photo (manager)", {
+        params: [idParam()], response: ok(ref('User')), errs: [400, 401, 403, 404],
+        requestBody: { required: true, content: { 'multipart/form-data': { schema: { type: 'object', properties: { avatar: { type: 'string', format: 'binary' } } } } } },
+      }),
+      delete: op(A, "Remove an employee's photo (manager)", { params: [idParam()], errs: [401, 403, 404] }),
     },
     '/api/admin/users/{id}/locations': {
       put: op(A, 'Set the check-in locations of an employee (manager)', { params: [idParam()], requestBody: body({ type: 'object', properties: { location_ids: { type: 'array', items: { type: 'integer' }, example: [1, 3] } } }), errs: [400, 401, 403, 404] }),

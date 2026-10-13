@@ -3,8 +3,8 @@
 import fs from 'node:fs';
 import { Router } from 'express';
 import { authenticate, leadersAndManagers, signToken } from '../middleware/auth.js';
-import { upload } from '../middleware/upload.js';
-import { checkIn, checkOut, history, todayStatus, dailyBoard } from '../services/attendance.js';
+import { avatarUpload, upload } from '../middleware/upload.js';
+import { checkIn, checkOut, dailyBoard, history, locationPing, todayStatus } from '../services/attendance.js';
 import { ownAdjustments } from '../services/adjustments.js';
 import { mobileDashboard } from '../services/dashboard.js';
 import { documentFile, ownDocuments, uploadOwnDocument } from '../services/documents.js';
@@ -13,12 +13,14 @@ import { ownPayslip } from '../services/payroll.js';
 import {
   cancelOwnRequest, createRequest, findRequest, leaveBalances, listOwnRequests, listRequests, reviewRequest,
 } from '../services/requests.js';
+import { registerDevice, unregisterDevice } from '../services/push.js';
 import { getSettings } from '../services/settings.js';
-import { changeOwnPassword, findUser, updateOwnProfile, verifyCredentials } from '../services/users.js';
+import { changeOwnPassword, findUser, removeAvatar, setAvatar, updateOwnProfile, verifyCredentials } from '../services/users.js';
 import { forbidden, notFound, unauthorized } from '../utils/errors.js';
 import { created, ok } from '../utils/http.js';
+import { avatarUrl } from '../utils/files.js';
 import { currentMonth, zonedParts } from '../utils/time.js';
-import { assertMonth, toId } from '../utils/validate.js';
+import { assertMonth, assertOneOf, requireFields, toId } from '../utils/validate.js';
 
 const router = Router();
 
@@ -35,6 +37,7 @@ function authPayload(user) {
     national_id: nationalIdNumber(user.national_id),
     type: userType(user.role),
     role: user.role,
+    avatar_url: avatarUrl(user.avatar_path),
   };
 }
 
@@ -73,6 +76,10 @@ router.patch('/employees/profile/update-password', async (req, res) => {
 });
 
 // ---- Home ----
+router.post('/employees/profile/avatar', avatarUpload.single('avatar'), async (req, res) =>
+  ok(res, await setAvatar(req.user.id, req.file), 'Photo updated'));
+router.delete('/employees/profile/avatar', async (req, res) => ok(res, await removeAvatar(req.user.id), 'Photo removed'));
+
 router.get('/employees/dashboard', async (req, res) => ok(res, await mobileDashboard(req.user.id)));
 
 router.get('/settings', async (_req, res) => {
@@ -84,6 +91,7 @@ router.get('/settings', async (_req, res) => {
 router.get('/attendance/today', async (req, res) => ok(res, await todayStatus(req.user.id)));
 router.post('/attendance/check-in', async (req, res) => ok(res, await checkIn(req.user.id, req.body), 'Checked in successfully'));
 router.post('/attendance/check-out', async (req, res) => ok(res, await checkOut(req.user.id, req.body), 'Checked out successfully'));
+router.post('/attendance/location-ping', async (req, res) => ok(res, await locationPing(req.user.id, req.body ?? {})));
 router.get('/attendance/history', async (req, res) => {
   const month = req.query.month ? assertMonth(req.query.month) : currentMonth((await getSettings()).timezone);
   ok(res, await history(req.user.id, month));
@@ -115,6 +123,21 @@ router.get('/documents/:id/file', async (req, res) => {
   const f = await documentFile(toId(req.params.id));
   if (f.userId !== req.user.id || !fs.existsSync(f.absPath)) throw notFound('File');
   res.download(f.absPath, f.name);
+});
+
+// Firebase Cloud Messaging token of this installation (push notifications even when the app is closed).
+router.post('/devices', async (req, res) => {
+  const body = req.body ?? {};
+  requireFields(body, ['token', 'platform']);
+  assertOneOf(body.platform, ['android', 'ios', 'web'], 'platform');
+  if (body.locale !== undefined) assertOneOf(body.locale, ['ar', 'en'], 'locale');
+  await registerDevice(req.user.id, { token: String(body.token).slice(0, 255), platform: body.platform, locale: body.locale });
+  ok(res, null, 'Device registered');
+});
+router.delete('/devices', async (req, res) => {
+  requireFields(req.body ?? {}, ['token']);
+  await unregisterDevice(req.user.id, String(req.body.token));
+  ok(res, null, 'Device removed');
 });
 
 router.get('/notifications', async (req, res) => ok(res, await listNotifications(req.user.id)));

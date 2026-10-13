@@ -3,6 +3,7 @@
 import fs from 'node:fs';
 import { Router } from 'express';
 import { authenticate, leadersAndManagers, managersOnly, signToken } from '../middleware/auth.js';
+import { avatarUpload } from '../middleware/upload.js';
 import { assertCanSupervise } from '../services/access.js';
 import { createAdjustment, deleteAdjustment, listAdjustments } from '../services/adjustments.js';
 import { dailyBoard, history, listAttendance, upsertRecord } from '../services/attendance.js';
@@ -17,7 +18,7 @@ import { leaveBalances, listRequests, reviewRequest } from '../services/requests
 import { deleteHoliday, getSettings, listHolidays, updateSettings, upsertHoliday } from '../services/settings.js';
 import { createTeam, deleteTeam, findTeam, listTeams, updateTeam } from '../services/teams.js';
 import {
-  changeOwnPassword, createUser, deactivateUser, findUser, listUsers, setUserLocations, updateUser, verifyCredentials,
+  changeOwnPassword, createUser, deactivateUser, findUser, listUsers, removeAvatar, setAvatar, setUserLocations, updateUser, verifyCredentials,
 } from '../services/users.js';
 import { forbidden, notFound, unauthorized } from '../utils/errors.js';
 import { created, ok } from '../utils/http.js';
@@ -58,6 +59,9 @@ router.get('/users/:id/attendance', async (req, res) => {
 router.post('/users', managersOnly, async (req, res) => created(res, await createUser(req.body ?? {}), 'Employee created'));
 router.patch('/users/:id', managersOnly, async (req, res) => ok(res, await updateUser(req.user, toId(req.params.id), req.body ?? {}), 'Employee updated'));
 router.delete('/users/:id', managersOnly, async (req, res) => ok(res, await deactivateUser(req.user, toId(req.params.id)), 'Employee deactivated'));
+router.post('/users/:id/avatar', managersOnly, avatarUpload.single('avatar'), async (req, res) =>
+  ok(res, await setAvatar(toId(req.params.id), req.file), 'Photo updated'));
+router.delete('/users/:id/avatar', managersOnly, async (req, res) => ok(res, await removeAvatar(toId(req.params.id)), 'Photo removed'));
 router.put('/users/:id/locations', managersOnly, async (req, res) => {
   const id = toId(req.params.id);
   await findUser(id);

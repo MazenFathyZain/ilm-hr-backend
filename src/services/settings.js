@@ -29,6 +29,7 @@ const VALIDATORS = {
     return [...new Set(v.map((d) => d.trim()))];
   },
   currency: (v) => { if (typeof v !== 'string' || !v.trim()) throw badRequest('currency is required'); return v.trim(); },
+  auto_checkout_on_leave: (v) => { if (typeof v !== 'boolean') throw badRequest('auto_checkout_on_leave must be true or false'); return v; },
 };
 
 export async function updateSettings(patch) {

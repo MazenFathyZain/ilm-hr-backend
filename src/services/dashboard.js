@@ -33,6 +33,7 @@ export async function mobileDashboard(userId) {
       team_name: user.team_name,
       manager: user.supervisor_name,
       role: user.role,
+      avatar_url: user.avatar_url,
     },
     attendance: { month: att.month, absence_days: att.absent_days, late_days: att.late_days, present_days: att.present_days },
     today: { date: status.date, can_check_in: status.can_check_in, can_check_out: status.can_check_out, record: status.record },

@@ -1,6 +1,10 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import bcrypt from 'bcryptjs';
+import { config } from '../config.js';
 import { all, get, run, setClause, tx } from '../db/index.js';
 import { badRequest, conflict, forbidden, notFound } from '../utils/errors.js';
+import { avatarUrl } from '../utils/files.js';
 import { assertDate, assertEmail, assertNumber, assertOneOf, pick, requireFields } from '../utils/validate.js';
 import { isManager, scopeFilter } from './access.js';
 import { getSettings } from './settings.js';
@@ -10,7 +14,7 @@ export const ROLES = ['manager', 'team_leader', 'employee'];
 const BASE_SELECT = `
   SELECT u.id, u.employee_code, u.name, u.email, u.national_id, u.phone, u.job_title, u.branch,
          u.role, u.team_id, t.name AS team_name, t.leader_id AS supervisor_id, s.name AS supervisor_name,
-         u.hire_date, u.basic_salary, u.annual_leave_balance, u.casual_leave_balance, u.is_active, u.created_at
+         u.hire_date, u.basic_salary, u.annual_leave_balance, u.casual_leave_balance, u.is_active, u.avatar_path, u.created_at
   FROM users u
   LEFT JOIN teams t ON t.id = u.team_id
   LEFT JOIN users s ON s.id = t.leader_id`;
@@ -33,7 +37,8 @@ async function locationsFor(userIds) {
 /** Shapes a user row for output. Salary is only visible to managers. */
 function present(row, locs, viewer) {
   if (!row) return row;
-  const out = { ...row, is_active: !!row.is_active, locations: locs.get(row.id) ?? [] };
+  const { avatar_path: avatarPath, ...rest } = row;
+  const out = { ...rest, avatar_url: avatarUrl(avatarPath), is_active: !!row.is_active, locations: locs.get(row.id) ?? [] };
   if (viewer && !isManager(viewer) && viewer.id !== row.id) delete out.basic_salary;
   return out;
 }
@@ -197,4 +202,29 @@ export async function verifyCredentials(email, password) {
   const row = typeof email === 'string' ? await get('SELECT * FROM users WHERE email = ?', email.trim()) : null;
   if (!row || typeof password !== 'string' || !(await bcrypt.compare(password, row.password_hash))) return null;
   return row;
+}
+
+// ---- Profile photo ----
+
+const avatarFile = (name) => path.join(config.uploadDir, 'avatars', path.basename(name));
+
+/** Stores a newly uploaded photo (from multer) as the user's avatar and deletes the previous one. */
+export async function setAvatar(userId, file) {
+  if (!file) throw badRequest('avatar image is required');
+  const row = await get('SELECT avatar_path FROM users WHERE id = ?', userId);
+  if (!row) {
+    fs.rm(file.path, { force: true }, () => {});
+    throw notFound('Employee');
+  }
+  await run('UPDATE users SET avatar_path = ? WHERE id = ?', path.basename(file.path), userId);
+  if (row.avatar_path) fs.rm(avatarFile(row.avatar_path), { force: true }, () => {});
+  return findUser(userId);
+}
+
+export async function removeAvatar(userId) {
+  const row = await get('SELECT avatar_path FROM users WHERE id = ?', userId);
+  if (!row) throw notFound('Employee');
+  await run('UPDATE users SET avatar_path = NULL WHERE id = ?', userId);
+  if (row.avatar_path) fs.rm(avatarFile(row.avatar_path), { force: true }, () => {});
+  return findUser(userId);
 }

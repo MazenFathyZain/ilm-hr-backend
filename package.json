@@ -5,11 +5,12 @@
   "type": "module",
   "description": "Express + MariaDB API for the Ilm HR mobile app and admin dashboard.",
   "scripts": {
-    "dev": "node --watch src/server.js",
+    "dev": "node --watch-path=src --watch-preserve-output src/server.js",
     "start": "node src/server.js",
     "migrate": "node src/db/migrate.js",
     "migrate:sqlite": "node src/db/migrate-sqlite.js",
     "seed": "node src/db/seed.js --reset",
+    "create-user": "node src/db/create-user.js",
     "test": "node --test --test-concurrency=1 test/"
   },
   "engines": {
@@ -20,6 +21,7 @@
     "cors": "^2.8.6",
     "dotenv": "^18.0.7",
     "express": "^5.3.0",
+    "firebase-admin": "^13.10.0",
     "jsonwebtoken": "^9.0.3",
     "mariadb": "^3.5.4",
     "multer": "^2.4.0",

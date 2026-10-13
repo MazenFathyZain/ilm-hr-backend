@@ -1,5 +1,6 @@
 import cors from 'cors';
 import express from 'express';
+import path from 'node:path';
 import multer from 'multer';
 import swaggerUi from 'swagger-ui-express';
 import { config } from './config.js';
@@ -15,6 +16,8 @@ export function createApp() {
   app.use(express.json({ limit: '1mb' }));
 
   app.get('/api/health', (_req, res) => res.json({ status: 200, message: 'OK' }));
+  // Profile photos (random, unguessable file names) – public so <img>/Image.network can load them.
+  app.use('/api/uploads/avatars', express.static(path.join(config.uploadDir, 'avatars'), { maxAge: '7d', index: false }));
   app.get('/api/docs.json', (_req, res) => res.json(openApiSpec));
   app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(openApiSpec, {
     customSiteTitle: 'Ilm HR API',

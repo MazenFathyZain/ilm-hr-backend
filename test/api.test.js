@@ -201,7 +201,7 @@ describe('roles: managers vs team leaders', () => {
   test('the requester is notified about the decision', async () => {
     const token = await loginAs('sara@ilm.test');
     const res = await call('GET', '/mobile/notifications', { token });
-    assert.ok(res.body.data.items.some((n) => /rejected|approved/.test(n.title)));
+    assert.ok(res.body.data.items.some((n) => n.type === 'request_decided' && n.data?.request_id));
   });
 });
 
@@ -286,5 +286,144 @@ describe('API documentation', () => {
       }
     }
     assert.deepEqual(missing, []);
+  });
+});
+
+describe('automatic check-out when leaving the location', () => {
+  const FAR = { latitude: 30.0700, longitude: 31.3500, accuracy: 10 }; // ~2.4 km from Cairo HQ
+
+  test('pings inside keep the employee checked in; a clear departure checks them out; returning reopens the day', async () => {
+    const token = await loginAs('youssef@ilm.test'); // assigned to Cairo HQ only
+    const id = await userId('youssef@ilm.test');
+    await (await import('../src/db/index.js')).run('DELETE FROM attendance WHERE user_id = ? AND work_date >= CURDATE() - INTERVAL 1 DAY', id);
+
+    assert.equal((await call('POST', '/mobile/attendance/check-in', { token, body: HQ })).status, 200);
+    const inside = await call('POST', '/mobile/attendance/location-ping', { token, body: { ...HQ, accuracy: 15 } });
+    assert.equal(inside.body.data.checked_in, true);
+    assert.equal(inside.body.data.inside, true);
+
+    // Poor accuracy near the edge is not treated as leaving.
+    const unsure = await call('POST', '/mobile/attendance/location-ping', { token, body: { latitude: 30.0575, longitude: 31.3301, accuracy: 100 } });
+    assert.equal(unsure.body.data.auto_checked_out, undefined);
+
+    const left = await call('POST', '/mobile/attendance/location-ping', { token, body: FAR });
+    assert.equal(left.body.data.auto_checked_out, true);
+    assert.equal(left.body.data.status.checked_out_automatically, true);
+    assert.equal(left.body.data.status.can_check_in, true);
+    assert.equal(left.body.data.status.record.left_location, true);
+
+    // Further pings while away do nothing.
+    assert.equal((await call('POST', '/mobile/attendance/location-ping', { token, body: FAR })).body.data.checked_in, false);
+
+    const back = await call('POST', '/mobile/attendance/check-in', { token, body: HQ });
+    assert.equal(back.status, 200, JSON.stringify(back.body));
+    assert.equal(back.body.data.can_check_out, true);
+    assert.equal(back.body.data.record.check_out_at, null);
+
+    const out = await call('POST', '/mobile/attendance/check-out', { token, body: HQ });
+    assert.equal(out.body.data.record.check_out_method, 'manual');
+
+    const notes = await call('GET', '/mobile/notifications', { token });
+    assert.ok(notes.body.data.items.some((n) => n.type === 'auto_checkout' && n.title === 'تم تسجيل انصرافك تلقائياً'));
+  });
+
+  test('managers can switch the behaviour off', async () => {
+    const mgr = await loginAs('manager@ilm.test', 'admin');
+    await call('PATCH', '/admin/settings', { token: mgr, body: { auto_checkout_on_leave: false } });
+    const token = await loginAs('youssef@ilm.test');
+    const res = await call('POST', '/mobile/attendance/location-ping', { token, body: FAR });
+    assert.equal(res.body.data.tracking, false);
+    await call('PATCH', '/admin/settings', { token: mgr, body: { auto_checkout_on_leave: true } });
+  });
+});
+
+describe('profile photos', () => {
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
+  const upload = (path, token, field = 'avatar', type = 'image/png') => {
+    const form = new FormData();
+    form.append(field, new Blob([png], { type }), 'me.png');
+    return fetch(base + path, { method: 'POST', headers: { authorization: `Bearer ${token}` }, body: form }).then(async (r) => ({ status: r.status, body: await r.json() }));
+  };
+
+  test('employee uploads a photo; it is served and shown in their profile', async () => {
+    const token = await loginAs('sara@ilm.test');
+    const res = await upload('/mobile/employees/profile/avatar', token);
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.match(res.body.data.avatar_url, /^\/api\/uploads\/avatars\/.+\.png$/);
+    const img = await fetch(base.replace('/api', '') + res.body.data.avatar_url);
+    assert.equal(img.status, 200);
+    const profile = await call('GET', '/mobile/employees/dashboard', { token });
+    assert.equal(profile.body.data.profile.avatar_url, res.body.data.avatar_url);
+  });
+
+  test('non-images are rejected and managers can set or remove photos', async () => {
+    const token = await loginAs('sara@ilm.test');
+    assert.equal((await upload('/mobile/employees/profile/avatar', token, 'avatar', 'application/pdf')).status, 400);
+    const mgr = await loginAs('manager@ilm.test', 'admin');
+    const sara = await userId('sara@ilm.test');
+    assert.equal((await upload(`/admin/users/${sara}/avatar`, mgr)).status, 200);
+    const removed = await call('DELETE', `/admin/users/${sara}/avatar`, { token: mgr });
+    assert.equal(removed.body.data.avatar_url, null);
+    const leader = await loginAs('leader@ilm.test', 'admin');
+    assert.equal((await upload(`/admin/users/${sara}/avatar`, leader)).status, 403);
+  });
+});
+
+describe('salary on mobile', () => {
+  test('only non-zero earnings and deductions are listed', async () => {
+    const mgr = await loginAs('manager@ilm.test', 'admin');
+    const id = await userId('omar@ilm.test');
+    await call('PUT', '/admin/payslips', { token: mgr, body: { user_id: id, month: '2031-02', basic_salary: 9000, earnings: { bonus_kpi: 500 }, deductions: { monthly_tax: 300, advances: 0 }, status: 'published' } });
+    const token = await loginAs('omar@ilm.test');
+    const res = await call('GET', '/mobile/salary?month=2031-02', { token });
+    assert.deepEqual(res.body.data.payslip.earnings_items, [{ key: 'bonus_kpi', amount: 500 }]);
+    assert.deepEqual(res.body.data.payslip.deductions_items, [{ key: 'monthly_tax', amount: 300 }]);
+  });
+});
+
+describe('push notifications', () => {
+  test('registered phones get the notification in their language; dead tokens are dropped; logout unregisters', async () => {
+    const { setPushTransport } = await import('../src/services/push.js');
+    const sent = [];
+    setPushTransport(async (msg) => {
+      sent.push(msg);
+      return msg.tokens.map((t) => (t === 'dead-token' ? { ok: false, code: 'messaging/registration-token-not-registered' } : { ok: true }));
+    });
+    try {
+      const employee = await loginAs('employee@ilm.test');
+      const leader = await loginAs('leader@ilm.test', 'admin');
+      assert.equal((await call('POST', '/mobile/devices', { token: employee, body: { token: 'phone-1', platform: 'android' } })).status, 200);
+      await call('POST', '/mobile/devices', { token: employee, body: { token: 'dead-token', platform: 'ios' } });
+      assert.equal((await call('POST', '/mobile/devices', { token: employee, body: { token: 'x', platform: 'pager' } })).status, 400);
+
+      // Arabic by default.
+      const req1 = await call('POST', '/mobile/requests', { token: employee, body: { type: 'complaint', reason: 'push test 1' } });
+      await call('PATCH', `/admin/requests/${req1.body.data.id}/reject`, { token: leader, body: { note: 'لا' } });
+      await new Promise((r) => setTimeout(r, 50));
+      const first = sent.find((m) => m.data.request_id === String(req1.body.data.id) && m.data.type === 'request_decided');
+      assert.ok(first, 'push sent');
+      assert.equal(first.title, 'تم رفض طلب شكوى');
+      assert.deepEqual(first.tokens.sort(), ['dead-token', 'phone-1']);
+
+      // The dead token was removed; switching the phone to English changes the language of later pushes.
+      await call('POST', '/mobile/devices', { token: employee, body: { token: 'phone-1', platform: 'android', locale: 'en' } });
+      const req2 = await call('POST', '/mobile/requests', { token: employee, body: { type: 'complaint', reason: 'push test 2' } });
+      await call('PATCH', `/admin/requests/${req2.body.data.id}/approve`, { token: leader });
+      await new Promise((r) => setTimeout(r, 50));
+      const second = sent.find((m) => m.data.request_id === String(req2.body.data.id) && m.data.type === 'request_decided');
+      assert.equal(second.title, 'Your complaint request was approved');
+      assert.deepEqual(second.tokens, ['phone-1']);
+
+      // Logout removes the phone: no more pushes.
+      await call('DELETE', '/mobile/devices', { token: employee, body: { token: 'phone-1' } });
+      const before = sent.length;
+      const req3 = await call('POST', '/mobile/requests', { token: employee, body: { type: 'complaint', reason: 'push test 3' } });
+      await call('PATCH', `/admin/requests/${req3.body.data.id}/approve`, { token: leader });
+      await new Promise((r) => setTimeout(r, 50));
+      assert.equal(sent.filter((m) => m.data.request_id === String(req3.body.data.id) && m.data.type === 'request_decided').length, 0);
+      assert.ok(sent.length >= before);
+    } finally {
+      setPushTransport(null);
+    }
   });
 });

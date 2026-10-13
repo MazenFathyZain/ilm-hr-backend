@@ -20,6 +20,23 @@
 
 **API docs:** Swagger UI is at **`/api/docs`**, and the raw OpenAPI JSON is at `/api/docs.json`. Click *Authorize* and paste a token from one of the login endpoints. A test fails if any route is missing from the docs (`src/docs/openapi.js`).
 
+### Creating users
+
+- **First manager on a fresh server:**
+  ```bash
+  npm run create-user -- --name "Full Name" --email you@company.com --password "a-strong-password" --role manager
+  ```
+- **Everyone else:** a manager adds them on the dashboard (**Employees → Add employee**) or calls `POST /api/admin/users`.
+
+### Push notifications (Firebase)
+
+Every in-app notification is also sent as a push notification, which Android and iOS show even when the app is closed. Texts are in the employee's language (`ar`/`en`, reported by the app when it registers).
+
+1. In the Firebase console (project **ilm-hr**), open **Project settings → Service accounts → Generate new private key**.
+2. Copy the JSON file to the server (e.g. `secrets/firebase-service-account.json`, never commit it), and set `FIREBASE_SERVICE_ACCOUNT=/full/path/to/that.json` in `.env`.
+3. Restart the API. The log shows `Push notifications: Firebase Cloud Messaging enabled`. Without the key, pushes are silently skipped and in-app notifications still work.
+4. **iOS only:** in Firebase → Project settings → Cloud Messaging, upload an APNs authentication key (`.p8`) from your Apple Developer account.
+
 ### Moving data from the old SQLite version
 
 ```bash

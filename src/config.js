@@ -19,6 +19,12 @@ export const config = {
   // Only used by `npm run migrate:sqlite` to import data from the previous SQLite version.
   sqliteFile: process.env.SQLITE_FILE ?? path.join(root, 'data', 'hr.sqlite'),
   uploadDir: process.env.UPLOAD_DIR ?? path.join(root, 'uploads'),
+  // Optional absolute origin used in file URLs (e.g. https://hr.example.com). Empty = relative URLs.
+  publicUrl: (process.env.PUBLIC_URL ?? '').replace(/\/$/, ''),
+  firebase: {
+    serviceAccountPath: process.env.FIREBASE_SERVICE_ACCOUNT ?? '',
+    serviceAccountJson: process.env.FIREBASE_SERVICE_ACCOUNT_JSON ?? '',
+  },
   corsOrigins: (process.env.CORS_ORIGINS ?? '*').split(',').map((s) => s.trim()),
   isProduction: process.env.NODE_ENV === 'production',
 };
