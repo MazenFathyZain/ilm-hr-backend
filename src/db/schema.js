@@ -28,6 +28,10 @@ export const SCHEMA = [
     casual_leave_balance SMALLINT UNSIGNED NOT NULL DEFAULT 7,
     is_active            TINYINT(1) NOT NULL DEFAULT 1,
     avatar_path          VARCHAR(255) NULL,
+    work_start           CHAR(5) NULL,
+    work_end             CHAR(5) NULL,
+    late_grace_minutes   SMALLINT UNSIGNED NULL,
+    weekend_days         VARCHAR(32) NULL,
     created_at           DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     KEY idx_users_team (team_id)
   ) ${TABLE_OPTS}`,
@@ -204,6 +208,11 @@ export const MIGRATIONS = [
   "ALTER TABLE users ADD COLUMN IF NOT EXISTS locale ENUM('ar','en') NOT NULL DEFAULT 'ar' AFTER avatar_path",
   'ALTER TABLE notifications ADD COLUMN IF NOT EXISTS type VARCHAR(40) NULL AFTER user_id',
   'ALTER TABLE notifications ADD COLUMN IF NOT EXISTS data TEXT NULL AFTER body',
+  // Per-employee schedule (NULL = company default from settings).
+  'ALTER TABLE users ADD COLUMN IF NOT EXISTS work_start CHAR(5) NULL AFTER locale',
+  'ALTER TABLE users ADD COLUMN IF NOT EXISTS work_end CHAR(5) NULL AFTER work_start',
+  'ALTER TABLE users ADD COLUMN IF NOT EXISTS late_grace_minutes SMALLINT UNSIGNED NULL AFTER work_end',
+  'ALTER TABLE users ADD COLUMN IF NOT EXISTS weekend_days VARCHAR(32) NULL AFTER late_grace_minutes',
 ];
 
 /** Tables in an order that is safe for deleting/copying with FK checks on. */

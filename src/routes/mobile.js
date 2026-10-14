@@ -15,7 +15,7 @@ import {
 } from '../services/requests.js';
 import { registerDevice, unregisterDevice } from '../services/push.js';
 import { getSettings } from '../services/settings.js';
-import { changeOwnPassword, findUser, removeAvatar, setAvatar, updateOwnProfile, verifyCredentials } from '../services/users.js';
+import { changeOwnPassword, directory, findUser, removeAvatar, setAvatar, updateOwnProfile, verifyCredentials } from '../services/users.js';
 import { forbidden, notFound, unauthorized } from '../utils/errors.js';
 import { created, ok } from '../utils/http.js';
 import { avatarUrl } from '../utils/files.js';
@@ -79,6 +79,9 @@ router.patch('/employees/profile/update-password', async (req, res) => {
 router.post('/employees/profile/avatar', avatarUpload.single('avatar'), async (req, res) =>
   ok(res, await setAvatar(req.user.id, req.file), 'Photo updated'));
 router.delete('/employees/profile/avatar', async (req, res) => ok(res, await removeAvatar(req.user.id), 'Photo removed'));
+
+// Staff directory (name, job, team, phone, email) so colleagues can call each other.
+router.get('/directory', async (req, res) => ok(res, await directory({ search: req.query.search })));
 
 router.get('/employees/dashboard', async (req, res) => ok(res, await mobileDashboard(req.user.id)));
 

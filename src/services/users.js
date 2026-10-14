@@ -7,6 +7,7 @@ import { badRequest, conflict, forbidden, notFound } from '../utils/errors.js';
 import { avatarUrl } from '../utils/files.js';
 import { assertDate, assertEmail, assertNumber, assertOneOf, pick, requireFields } from '../utils/validate.js';
 import { isManager, scopeFilter } from './access.js';
+import { cleanSchedule, presentSchedule } from './schedule.js';
 import { getSettings } from './settings.js';
 
 export const ROLES = ['manager', 'team_leader', 'employee'];
@@ -14,7 +15,8 @@ export const ROLES = ['manager', 'team_leader', 'employee'];
 const BASE_SELECT = `
   SELECT u.id, u.employee_code, u.name, u.email, u.national_id, u.phone, u.job_title, u.branch,
          u.role, u.team_id, t.name AS team_name, t.leader_id AS supervisor_id, s.name AS supervisor_name,
-         u.hire_date, u.basic_salary, u.annual_leave_balance, u.casual_leave_balance, u.is_active, u.avatar_path, u.created_at
+         u.hire_date, u.basic_salary, u.annual_leave_balance, u.casual_leave_balance, u.is_active, u.avatar_path, u.created_at,
+         u.work_start, u.work_end, u.late_grace_minutes, u.weekend_days
   FROM users u
   LEFT JOIN teams t ON t.id = u.team_id
   LEFT JOIN users s ON s.id = t.leader_id`;
@@ -35,10 +37,16 @@ async function locationsFor(userIds) {
 }
 
 /** Shapes a user row for output. Salary is only visible to managers. */
-function present(row, locs, viewer) {
+function present(row, locs, viewer, settings) {
   if (!row) return row;
-  const { avatar_path: avatarPath, ...rest } = row;
-  const out = { ...rest, avatar_url: avatarUrl(avatarPath), is_active: !!row.is_active, locations: locs.get(row.id) ?? [] };
+  const { avatar_path: avatarPath, work_start: _ws, work_end: _we, late_grace_minutes: _lg, weekend_days: _wd, ...rest } = row;
+  const out = {
+    ...rest,
+    avatar_url: avatarUrl(avatarPath),
+    is_active: !!row.is_active,
+    locations: locs.get(row.id) ?? [],
+    schedule: presentSchedule(row, settings),
+  };
   if (viewer && !isManager(viewer) && viewer.id !== row.id) delete out.basic_salary;
   return out;
 }
@@ -46,7 +54,7 @@ function present(row, locs, viewer) {
 export async function findUser(id, viewer) {
   const row = await get(`${BASE_SELECT} WHERE u.id = ?`, id);
   if (!row) throw notFound('Employee');
-  return present(row, await locationsFor([id]), viewer);
+  return present(row, await locationsFor([id]), viewer, await getSettings());
 }
 
 export async function listUsers(viewer, { search, role, team_id, active } = {}) {
@@ -62,7 +70,8 @@ export async function listUsers(viewer, { search, role, team_id, active } = {}) 
   if (active === 'true' || active === 'false') { where.push('u.is_active = ?'); params.push(active === 'true' ? 1 : 0); }
   const rows = await all(`${BASE_SELECT} WHERE ${where.join(' AND ')} ORDER BY u.name`, ...params);
   const locs = await locationsFor(rows.map((r) => r.id));
-  return rows.map((r) => present(r, locs, viewer));
+  const settings = await getSettings();
+  return rows.map((r) => present(r, locs, viewer, settings));
 }
 
 const EDITABLE = ['employee_code', 'name', 'email', 'national_id', 'phone', 'job_title', 'branch', 'role', 'team_id',
@@ -85,6 +94,7 @@ async function clean(input) {
   }
   if (patch.national_id != null) patch.national_id = String(patch.national_id).trim();
   if (patch.is_active !== undefined) patch.is_active = patch.is_active ? 1 : 0;
+  Object.assign(patch, cleanSchedule(input));
   for (const k of ['employee_code', 'phone', 'job_title', 'branch', 'hire_date', 'national_id']) {
     if (patch[k] === '') patch[k] = null;
   }
@@ -227,4 +237,21 @@ export async function removeAvatar(userId) {
   await run('UPDATE users SET avatar_path = NULL WHERE id = ?', userId);
   if (row.avatar_path) fs.rm(avatarFile(row.avatar_path), { force: true }, () => {});
   return findUser(userId);
+}
+
+/** Company directory for the mobile app: every active colleague with contact details (no salary or HR data). */
+export async function directory({ search } = {}) {
+  const where = ['u.is_active = 1'];
+  const params = [];
+  if (search) {
+    where.push('(u.name LIKE ? OR u.job_title LIKE ? OR u.phone LIKE ? OR u.email LIKE ? OR t.name LIKE ?)');
+    params.push(...Array(5).fill(`%${search}%`));
+  }
+  const rows = await all(
+    `SELECT u.id, u.name, u.job_title, u.branch, u.phone, u.email, u.role, u.avatar_path, t.name AS team_name
+     FROM users u LEFT JOIN teams t ON t.id = u.team_id
+     WHERE ${where.join(' AND ')} ORDER BY u.name`,
+    ...params,
+  );
+  return rows.map(({ avatar_path: avatarPath, ...r }) => ({ ...r, avatar_url: avatarUrl(avatarPath) }));
 }

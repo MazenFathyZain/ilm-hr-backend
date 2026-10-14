@@ -427,3 +427,118 @@ describe('push notifications', () => {
     }
   });
 });
+
+describe('error messages in the user language', () => {
+  const arCall = (method, path, opts = {}) => fetch(base + path, {
+    method,
+    headers: { 'content-type': 'application/json', 'accept-language': 'ar', ...(opts.token && { authorization: `Bearer ${opts.token}` }) },
+    body: opts.body && JSON.stringify(opts.body),
+  }).then(async (r) => ({ status: r.status, body: await r.json() }));
+
+  test('Arabic when the client asks for it, English otherwise; codes stay the same', async () => {
+    const ar = await arCall('POST', '/mobile/employees/login', { body: { email: 'employee@ilm.test', password: 'wrong' } });
+    assert.equal(ar.status, 401);
+    assert.equal(ar.body.message, 'البريد الإلكتروني أو كلمة المرور غير صحيحة');
+    assert.equal(ar.body.code, 'unauthorized');
+    const en = await call('POST', '/mobile/employees/login', { body: { email: 'employee@ilm.test', password: 'wrong' } });
+    assert.equal(en.body.message, 'Invalid email or password');
+  });
+
+  test('messages with values keep them (distance, fields, ids)', async () => {
+    const token = await loginAs('employee@ilm.test');
+    const sara = await loginAs('sara@ilm.test'); // has not checked in during the tests
+    const far = await arCall('POST', '/mobile/attendance/check-in', { token: sara, body: { latitude: 29.9, longitude: 31.2 } });
+    assert.match(far.body.message, /^أنت على بعد \d+ متر من .+ اقترب لمسافة \d+ متر/);
+    assert.equal(far.body.code, 'outside_location');
+    const missing = await arCall('POST', '/mobile/requests', { token, body: { type: 'overtime' } });
+    assert.equal(missing.body.message, 'يرجى إدخال: تاريخ البداية، عدد الساعات');
+    const notFound = await arCall('GET', '/mobile/requests/999999', { token });
+    assert.equal(notFound.body.message, 'الطلب غير موجود');
+    const noRoute = await arCall('GET', '/mobile/nope', { token });
+    assert.equal(noRoute.body.message, 'الرابط غير موجود');
+  });
+
+  test('every fixed error message in the code has an Arabic translation', async () => {
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    const { localizeError } = await import('../src/utils/errorMessages.js');
+    const files = fs.readdirSync('src', { recursive: true }).filter((f) => f.endsWith('.js')).map((f) => path.join('src', f));
+    const fallback = new Set(['البيانات المدخلة غير صحيحة', 'يجب تسجيل الدخول أولاً', 'ليس لديك صلاحية للقيام بهذا الإجراء',
+      'العنصر المطلوب غير موجود', 'لا يمكن تنفيذ هذا الإجراء حالياً', 'لا يمكن تنفيذ هذا الإجراء']);
+    const untranslated = [];
+    for (const file of files) {
+      const src = fs.readFileSync(file, 'utf8');
+      for (const m of src.matchAll(/(badRequest|unauthorized|forbidden|notFound|conflict|unprocessable)\(\s*'([^']+)'/g)) {
+        const message = m[1] === 'notFound' ? `${m[2]} not found` : m[2];
+        const ar = localizeError(message, 400, 'ar');
+        // Generic fallbacks are fine for the default helper messages themselves, not for specific ones.
+        if (fallback.has(ar) && !['Authentication required', 'You do not have permission to do this'].includes(message)) {
+          untranslated.push(`${file}: ${message}`);
+        }
+      }
+    }
+    assert.deepEqual(untranslated, []);
+  });
+});
+
+describe('per-employee working schedule', () => {
+  // Next date (from 2031-03-01) that falls on the given weekday (0 = Sunday … 6 = Saturday).
+  const nextWeekday = (wd, from = '2031-03-01') => {
+    const d = new Date(`${from}T00:00:00Z`);
+    while (d.getUTCDay() !== wd) d.setUTCDate(d.getUTCDate() + 1);
+    return d.toISOString().slice(0, 10);
+  };
+  const addDays = (iso, n) => { const d = new Date(`${iso}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
+
+  test('managers set own hours and days off; leave days and the daily board follow them', async () => {
+    const mgr = await loginAs('manager@ilm.test', 'admin');
+    const youssef = await userId('youssef@ilm.test');
+    const set = await call('PATCH', `/admin/users/${youssef}`, { token: mgr, body: { work_start: '11:00', work_end: '19:00', weekend_days: [0, 1] } });
+    assert.equal(set.status, 200, JSON.stringify(set.body));
+    assert.equal(set.body.data.schedule.custom, true);
+    assert.equal(set.body.data.schedule.work_start, '11:00');
+    assert.deepEqual(set.body.data.schedule.weekend_days, [0, 1]);
+    assert.equal(set.body.data.schedule.late_grace_minutes, 15, 'grace falls back to the company default');
+
+    // Thursday → Saturday: Youssef (off Sun/Mon) works all 3 days; Omar (company weekend Fri/Sat) only Thursday.
+    const thu = nextWeekday(4);
+    const leave = { type: 'leave', leave_type: 'unpaid', start_date: thu, end_date: addDays(thu, 2) };
+    const y = await call('POST', '/mobile/requests', { token: await loginAs('youssef@ilm.test'), body: leave });
+    const o = await call('POST', '/mobile/requests', { token: await loginAs('omar@ilm.test'), body: leave });
+    assert.equal(y.body.data.days, 3);
+    assert.equal(o.body.data.days, 1);
+
+    const monday = nextWeekday(1);
+    const board = await call('GET', `/admin/attendance/board?date=${monday}`, { token: mgr });
+    const row = (email) => board.body.data.rows.find((r) => r.id === email);
+    assert.equal(row(youssef).status, 'day_off');
+    assert.equal(row(youssef).work_start, '11:00');
+    assert.notEqual(row(await userId('omar@ilm.test')).status, 'day_off');
+  });
+
+  test('invalid schedules are rejected and fields can be reset to the company default', async () => {
+    const mgr = await loginAs('manager@ilm.test', 'admin');
+    const youssef = await userId('youssef@ilm.test');
+    const bad = await call('PATCH', `/admin/users/${youssef}`, { token: mgr, body: { work_start: '18:00', work_end: '09:00' } });
+    assert.equal(bad.status, 400);
+    assert.equal((await call('PATCH', `/admin/users/${youssef}`, { token: mgr, body: { weekend_days: [9] } })).status, 400);
+    const reset = await call('PATCH', `/admin/users/${youssef}`, { token: mgr, body: { work_start: '', work_end: null, weekend_days: null } });
+    assert.equal(reset.body.data.schedule.custom, false);
+    assert.equal(reset.body.data.schedule.work_start, '09:00');
+  });
+});
+
+describe('staff directory', () => {
+  test('every employee can see colleagues with phone and email, but no HR data', async () => {
+    const token = await loginAs('employee@ilm.test');
+    const res = await call('GET', '/mobile/directory', { token });
+    assert.equal(res.status, 200);
+    const manager = res.body.data.find((u) => u.email === 'manager@ilm.test');
+    assert.ok(manager.phone);
+    assert.ok('avatar_url' in manager);
+    assert.equal(manager.basic_salary, undefined);
+    assert.ok(res.body.data.every((u) => !('national_id' in u)));
+    const search = await call('GET', `/mobile/directory?search=${encodeURIComponent('سارة')}`, { token });
+    assert.deepEqual(search.body.data.map((u) => u.email), ['sara@ilm.test']);
+  });
+});

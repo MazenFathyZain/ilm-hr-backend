@@ -6,6 +6,7 @@ import { avatarUrl } from '../utils/files.js';
 import { assertCanSupervise, scopeFilter } from './access.js';
 import { workingDaysBetween } from './calendar.js';
 import { notify } from './notifications.js';
+import { employeeSettings } from './schedule.js';
 import { getSettings } from './settings.js';
 
 export const REQUEST_TYPES = ['leave', 'allowance', 'mission', 'early_leave', 'overtime', 'complaint'];
@@ -68,7 +69,8 @@ async function assertNoOverlap(userId, start, end, exceptId = 0) {
 async function buildRequest(userId, body) {
   requireFields(body, ['type']);
   const type = assertOneOf(body.type, REQUEST_TYPES, 'type');
-  const settings = await getSettings();
+  // Leave/mission days skip the employee's own days off.
+  const settings = await employeeSettings(userId);
   const reason = typeof body.reason === 'string' ? body.reason.trim() : null;
   const r = { user_id: userId, type, reason: reason || null };
 

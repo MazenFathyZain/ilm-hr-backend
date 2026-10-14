@@ -7,7 +7,13 @@ import { config } from './config.js';
 import { openApiSpec } from './docs/openapi.js';
 import adminRoutes from './routes/admin.js';
 import mobileRoutes from './routes/mobile.js';
+import { localizeError, requestLang } from './utils/errorMessages.js';
 import { HttpError } from './utils/errors.js';
+
+/** Error envelope { status, message, code, data? } with the message in the caller's language (Accept-Language). */
+function send(req, res, status, message, code, data) {
+  res.status(status).json({ status, message: localizeError(message, status, requestLang(req)), code, ...(data && { data }) });
+}
 
 export function createApp() {
   const app = express();
@@ -26,21 +32,19 @@ export function createApp() {
   app.use('/api/mobile', mobileRoutes);
   app.use('/api/admin', adminRoutes);
 
-  app.use((_req, res) => res.status(404).json({ status: 404, message: 'Endpoint not found', code: 'not_found' }));
+  app.use((req, res) => send(req, res, 404, 'Endpoint not found', 'not_found'));
 
   // eslint-disable-next-line no-unused-vars
-  app.use((err, _req, res, _next) => {
-    if (err instanceof HttpError) {
-      return res.status(err.status).json({ status: err.status, message: err.message, code: err.code, ...(err.data && { data: err.data }) });
-    }
+  app.use((err, req, res, _next) => {
+    if (err instanceof HttpError) return send(req, res, err.status, err.message, err.code, err.data);
     if (err instanceof multer.MulterError) {
-      return res.status(400).json({ status: 400, message: err.message, code: 'upload_error' });
+      return err.code === 'LIMIT_FILE_SIZE'
+        ? send(req, res, 413, 'File too large', 'file_too_large')
+        : send(req, res, 400, err.message, 'upload_error');
     }
-    if (err.type === 'entity.parse.failed') {
-      return res.status(400).json({ status: 400, message: 'Malformed JSON body', code: 'bad_request' });
-    }
+    if (err.type === 'entity.parse.failed') return send(req, res, 400, 'Malformed JSON body', 'bad_request');
     console.error(err);
-    res.status(500).json({ status: 500, message: 'Internal server error', code: 'internal_error' });
+    send(req, res, 500, 'Internal server error', 'internal_error');
   });
   return app;
 }

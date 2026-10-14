@@ -92,6 +92,7 @@ export const openApiSpec = {
           team_name: { type: 'string', nullable: true }, supervisor_id: { type: 'integer', nullable: true }, supervisor_name: { type: 'string', nullable: true },
           hire_date: { type: 'string', format: 'date' }, basic_salary: { type: 'number', description: 'Only visible to managers and the user themselves' },
           avatar_url: { type: 'string', nullable: true, description: 'Relative to the API origin unless PUBLIC_URL is set' },
+          schedule: { type: 'object', description: 'Effective working schedule; `own` holds the employee-specific values (null = company default)', properties: { work_start: { type: 'string' }, work_end: { type: 'string' }, late_grace_minutes: { type: 'integer' }, weekend_days: { type: 'array', items: { type: 'integer' } }, custom: { type: 'boolean' }, own: { type: 'object' } } },
           annual_leave_balance: { type: 'integer' }, casual_leave_balance: { type: 'integer' }, is_active: { type: 'boolean' },
           locations: { type: 'array', items: { type: 'object', properties: { id: { type: 'integer' }, name: { type: 'string' } } } },
         },
@@ -105,6 +106,10 @@ export const openApiSpec = {
           hire_date: { type: 'string', format: 'date' }, basic_salary: { type: 'number' }, annual_leave_balance: { type: 'integer' },
           casual_leave_balance: { type: 'integer' }, is_active: { type: 'boolean' },
           location_ids: { type: 'array', items: { type: 'integer' }, description: 'Check-in locations the user may use' },
+          work_start: { type: 'string', nullable: true, example: '11:00', description: 'Own schedule; null/empty = company default' },
+          work_end: { type: 'string', nullable: true, example: '19:00' },
+          late_grace_minutes: { type: 'integer', nullable: true },
+          weekend_days: { type: 'array', nullable: true, items: { type: 'integer' }, example: [0, 1], description: '0 = Sunday … 6 = Saturday' },
         },
       },
       Team: {
@@ -256,6 +261,12 @@ export const openApiSpec = {
         response: ok(ref('User')),
       }),
       delete: op(M, 'Remove own profile photo', { response: ok(ref('User')) }),
+    },
+    '/api/mobile/directory': {
+      get: op(M, 'Staff directory: active colleagues with job, team, phone and email', {
+        params: [q('search', { type: 'string' }, 'Name, job title, phone, email or team')],
+        response: ok({ type: 'array', items: { type: 'object', properties: { id: { type: 'integer' }, name: { type: 'string' }, job_title: { type: 'string' }, team_name: { type: 'string' }, branch: { type: 'string' }, phone: { type: 'string' }, email: { type: 'string' }, role: { type: 'string' }, avatar_url: { type: 'string', nullable: true } } } }),
+      }),
     },
     '/api/mobile/employees/dashboard': { get: op(M, 'Home screen: profile card, monthly attendance, leave balances, request counts') },
     '/api/mobile/settings': { get: op(M, 'Company name, time zone and working hours') },
