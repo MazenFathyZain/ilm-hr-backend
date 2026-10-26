@@ -41,7 +41,7 @@ router.patch('/auth/password', async (req, res) => { await changeOwnPassword(req
 router.get('/notifications', async (req, res) => ok(res, await listNotifications(req.user.id)));
 router.patch('/notifications/read-all', async (req, res) => { await markAllRead(req.user.id); ok(res, null); });
 
-router.get('/overview', async (req, res) => ok(res, await adminOverview(req.user)));
+router.get('/overview', async (req, res) => ok(res, await adminOverview(req.user, req.query)));
 
 // ---- Employees ----
 router.get('/users', async (req, res) => ok(res, await listUsers(req.user, req.query)));

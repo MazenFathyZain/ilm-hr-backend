@@ -1,9 +1,14 @@
 import { all, get } from '../db/index.js';
+import { badRequest } from '../utils/errors.js';
 import { addDays, zonedParts } from '../utils/time.js';
+import { assertDate } from '../utils/validate.js';
 import { scopeFilter } from './access.js';
 import { dailyBoard, monthSummary, todayStatus } from './attendance.js';
+import { holidaySet, isWorkingDay } from './calendar.js';
 import { documentSummary } from './documents.js';
 import { leaveBalances, listRequests, requestStats } from './requests.js';
+import { calculatePeriodStats } from './periodStats.js';
+import { applySchedule } from './schedule.js';
 import { getSettings } from './settings.js';
 import { findUser } from './users.js';
 
@@ -48,9 +53,56 @@ export async function mobileDashboard(userId) {
   };
 }
 
-export async function adminOverview(viewer) {
+/** Totals are employee-days, scoped to the same active employees shown on the daily board. */
+async function attendancePeriod(viewer, settings, today, range = {}) {
+  const from = range.from ? assertDate(range.from, 'from') : `${today.slice(0, 7)}-01`;
+  const to = range.to ? assertDate(range.to, 'to') : today;
+  if (from > to) throw badRequest('from must be on or before to');
+  if ((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86400000 > 365) {
+    throw badRequest('Date range cannot exceed 366 days');
+  }
+
+  const scope = await scopeFilter(viewer, 'u.id');
+  const users = await all(
+    `SELECT u.id, u.hire_date, u.created_at, u.work_start, u.work_end, u.late_grace_minutes, u.weekend_days
+     FROM users u WHERE u.is_active = 1 AND ${scope.sql}`,
+    ...scope.params,
+  );
+  const ids = users.map((u) => u.id);
+  if (!ids.length) return calculatePeriodStats({
+    from, to, today, users, records: [], breaks: [], leave: [], holidays: new Set(),
+    scheduleForUser: (user) => applySchedule(settings, user), isWorkingDay,
+  });
+
+  const placeholders = ids.map(() => '?').join(',');
+  const records = await all(
+    `SELECT a.id, a.user_id, a.work_date, a.check_in_at, a.check_out_at, a.late_minutes
+     FROM attendance a WHERE a.user_id IN (${placeholders}) AND a.work_date BETWEEN ? AND ? AND a.check_in_at IS NOT NULL`,
+    ...ids, from, to,
+  );
+  const breaks = await all(
+    `SELECT b.attendance_id, SUM(TIMESTAMPDIFF(SECOND, b.left_at, b.returned_at)) AS seconds_away
+     FROM attendance_breaks b JOIN attendance a ON a.id = b.attendance_id
+     WHERE a.user_id IN (${placeholders}) AND a.work_date BETWEEN ? AND ? AND b.returned_at IS NOT NULL
+     GROUP BY b.attendance_id`,
+    ...ids, from, to,
+  );
+  const leave = await all(
+    `SELECT r.user_id, r.start_date, r.end_date FROM requests r
+     WHERE r.user_id IN (${placeholders}) AND r.status = 'approved' AND r.type IN ('leave', 'mission')
+       AND r.start_date <= ? AND r.end_date >= ?`,
+    ...ids, to, from,
+  );
+  return calculatePeriodStats({
+    from, to, today, users, records, breaks, leave, holidays: await holidaySet(from, to),
+    scheduleForUser: (user) => applySchedule(settings, user), isWorkingDay,
+  });
+}
+
+export async function adminOverview(viewer, range = {}) {
   const settings = await getSettings();
   const today = zonedParts(new Date(), settings.timezone).date;
+  const period = await attendancePeriod(viewer, settings, today, range);
   const scope = await scopeFilter(viewer, 'u.id');
   const employees = (await get(`SELECT COUNT(*) AS n FROM users u WHERE u.is_active = 1 AND ${scope.sql}`, ...scope.params)).n;
   const board = await dailyBoard(viewer, today);
@@ -79,5 +131,6 @@ export async function adminOverview(viewer) {
     requests: await requestStats(viewer),
     pending_requests: (await listRequests(viewer, { status: 'pending' })).slice(0, 6),
     attendance_trend: trend,
+    period,
   };
 }
