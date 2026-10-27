@@ -63,3 +63,18 @@ test('empty scope returns no employee rows', () => {
   });
   assert.deepEqual(period, { from: '2026-10-01', to: '2026-10-26', employees: [] });
 });
+
+test('absence days use each employee’s weekend override or company default', () => {
+  const period = calculatePeriodStats({
+    from: '2026-10-23', to: '2026-10-26', today: '2026-10-27',
+    users: [
+      { id: 1, name: 'Friday only', hire_date: '2026-10-23', weekend_days: [5] },
+      { id: 2, name: 'Friday and Saturday', hire_date: '2026-10-23', weekend_days: [5, 6] },
+      { id: 3, name: 'Company default', hire_date: '2026-10-23', weekend_days: null },
+    ],
+    records: [], breaks: [], leave: [], holidays: new Set(),
+    scheduleForUser: (user) => ({ weekend_days: user.weekend_days ?? [5, 6] }),
+    isWorkingDay,
+  });
+  assert.deepEqual(period.employees.map((employee) => employee.absent_days), [3, 2, 2]);
+});
