@@ -9,6 +9,7 @@ export function calculatePeriodStats({ from, to, today, users, records, breaks, 
     team_name: user.team_name,
     avatar_url: user.avatar_url,
     worked_hours: 0,
+    average_hours_per_day: 0,
     attendance_days: 0,
     absent_days: 0,
     late_days: 0,
@@ -19,6 +20,7 @@ export function calculatePeriodStats({ from, to, today, users, records, breaks, 
   const attended = new Set();
   const awayByRecord = new Map(breaks.map((b) => [b.attendance_id, Number(b.seconds_away)]));
   const workedSeconds = new Map();
+  const completedDays = new Map();
   for (const record of records) {
     const employee = byUser.get(record.user_id);
     if (!employee) continue;
@@ -28,9 +30,15 @@ export function calculatePeriodStats({ from, to, today, users, records, breaks, 
     if (record.check_out_at) {
       const duration = (Date.parse(record.check_out_at) - Date.parse(record.check_in_at)) / 1000;
       workedSeconds.set(record.user_id, (workedSeconds.get(record.user_id) ?? 0) + Math.max(0, duration - (awayByRecord.get(record.id) ?? 0)));
+      completedDays.set(record.user_id, (completedDays.get(record.user_id) ?? 0) + 1);
     }
   }
-  for (const employee of employees) employee.worked_hours = Math.round((workedSeconds.get(employee.user_id) ?? 0) / 360) / 10;
+  for (const employee of employees) {
+    const seconds = workedSeconds.get(employee.user_id) ?? 0;
+    const days = completedDays.get(employee.user_id) ?? 0;
+    employee.worked_hours = Math.round(seconds / 360) / 10;
+    employee.average_hours_per_day = days ? Math.round(seconds / days / 360) / 10 : 0;
+  }
 
   const excused = new Set();
   for (const request of leave) {

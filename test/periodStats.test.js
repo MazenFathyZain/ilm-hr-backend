@@ -30,14 +30,26 @@ test('period statistics stay separate for each employee and respect attendance r
     from: '2026-10-19', to: '2026-10-26', employees: [
       {
         user_id: 1, name: 'First', employee_code: 'E001', team_name: 'Design', avatar_url: null,
-        worked_hours: 15, attendance_days: 3, absent_days: 1, late_days: 1, excused_days: 1, attendance_rate: 67,
+        worked_hours: 15, average_hours_per_day: 7.5, attendance_days: 3, absent_days: 1, late_days: 1, excused_days: 1, attendance_rate: 67,
       },
       {
         user_id: 2, name: 'Second', employee_code: 'E002', team_name: 'Finance', avatar_url: null,
-        worked_hours: 8, attendance_days: 1, absent_days: 0, late_days: 0, excused_days: 0, attendance_rate: 100,
+        worked_hours: 8, average_hours_per_day: 8, attendance_days: 1, absent_days: 0, late_days: 0, excused_days: 0, attendance_rate: 100,
       },
     ],
   });
+});
+
+test('average hours are zero when an employee has no completed workday', () => {
+  const period = calculatePeriodStats({
+    from: '2026-10-26', to: '2026-10-26', today: '2026-10-26',
+    users: [{ id: 3, name: 'Third', hire_date: '2026-10-26' }],
+    records: [{ id: 15, user_id: 3, work_date: '2026-10-26', check_in_at: '2026-10-26T09:00:00Z', check_out_at: null, late_minutes: 0 }],
+    breaks: [], leave: [], holidays: new Set(),
+    scheduleForUser: () => ({ weekend_days: [5, 6] }), isWorkingDay,
+  });
+  assert.equal(period.employees[0].attendance_days, 1);
+  assert.equal(period.employees[0].average_hours_per_day, 0);
 });
 
 test('empty scope returns no employee rows', () => {
