@@ -6,12 +6,12 @@ import { weekday } from '../src/utils/time.js';
 const isWorkingDay = (date, schedule, holidays) =>
   !schedule.weekend_days.includes(weekday(date)) && !holidays.has(date);
 
-test('period totals respect completed shifts, breaks, leave, holidays, hire dates and weekends', () => {
-  const totals = calculatePeriodStats({
+test('period statistics stay separate for each employee and respect attendance rules', () => {
+  const period = calculatePeriodStats({
     from: '2026-10-19', to: '2026-10-26', today: '2026-10-26',
     users: [
-      { id: 1, hire_date: '2026-10-19' },
-      { id: 2, hire_date: '2026-10-25' },
+      { id: 1, name: 'First', employee_code: 'E001', team_name: 'Design', avatar_url: null, hire_date: '2026-10-19' },
+      { id: 2, name: 'Second', employee_code: 'E002', team_name: 'Finance', avatar_url: null, hire_date: '2026-10-25' },
     ],
     records: [
       { id: 11, user_id: 1, work_date: '2026-10-19', check_in_at: '2026-10-19T09:00:00Z', check_out_at: '2026-10-19T17:00:00Z', late_minutes: 0 },
@@ -26,19 +26,25 @@ test('period totals respect completed shifts, breaks, leave, holidays, hire date
     isWorkingDay,
   });
 
-  assert.deepEqual(totals, {
-    from: '2026-10-19', to: '2026-10-26', worked_hours: 23,
-    attendance_days: 4, absent_days: 1, late_days: 1, excused_days: 1, attendance_rate: 75,
+  assert.deepEqual(period, {
+    from: '2026-10-19', to: '2026-10-26', employees: [
+      {
+        user_id: 1, name: 'First', employee_code: 'E001', team_name: 'Design', avatar_url: null,
+        worked_hours: 15, attendance_days: 3, absent_days: 1, late_days: 1, excused_days: 1, attendance_rate: 67,
+      },
+      {
+        user_id: 2, name: 'Second', employee_code: 'E002', team_name: 'Finance', avatar_url: null,
+        worked_hours: 8, attendance_days: 1, absent_days: 0, late_days: 0, excused_days: 0, attendance_rate: 100,
+      },
+    ],
   });
 });
 
-test('empty scope returns zero totals', () => {
-  const totals = calculatePeriodStats({
+test('empty scope returns no employee rows', () => {
+  const period = calculatePeriodStats({
     from: '2026-10-01', to: '2026-10-26', today: '2026-10-26',
     users: [], records: [], breaks: [], leave: [], holidays: new Set(),
     scheduleForUser: () => ({ weekend_days: [5, 6] }), isWorkingDay,
   });
-  assert.equal(totals.worked_hours, 0);
-  assert.equal(totals.absent_days, 0);
-  assert.equal(totals.attendance_rate, 0);
+  assert.deepEqual(period, { from: '2026-10-01', to: '2026-10-26', employees: [] });
 });

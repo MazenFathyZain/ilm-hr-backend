@@ -1,5 +1,6 @@
 import { all, get } from '../db/index.js';
 import { badRequest } from '../utils/errors.js';
+import { avatarUrl } from '../utils/files.js';
 import { addDays, zonedParts } from '../utils/time.js';
 import { assertDate } from '../utils/validate.js';
 import { scopeFilter } from './access.js';
@@ -53,7 +54,7 @@ export async function mobileDashboard(userId) {
   };
 }
 
-/** Totals are employee-days, scoped to the same active employees shown on the daily board. */
+/** Per-employee statistics, scoped to the same active employees shown on the daily board. */
 async function attendancePeriod(viewer, settings, today, range = {}) {
   const from = range.from ? assertDate(range.from, 'from') : `${today.slice(0, 7)}-01`;
   const to = range.to ? assertDate(range.to, 'to') : today;
@@ -63,11 +64,13 @@ async function attendancePeriod(viewer, settings, today, range = {}) {
   }
 
   const scope = await scopeFilter(viewer, 'u.id');
-  const users = await all(
-    `SELECT u.id, u.hire_date, u.created_at, u.work_start, u.work_end, u.late_grace_minutes, u.weekend_days
-     FROM users u WHERE u.is_active = 1 AND ${scope.sql}`,
+  const users = (await all(
+    `SELECT u.id, u.name, u.employee_code, u.avatar_path, t.name AS team_name,
+            u.hire_date, u.created_at, u.work_start, u.work_end, u.late_grace_minutes, u.weekend_days
+     FROM users u LEFT JOIN teams t ON t.id = u.team_id
+     WHERE u.is_active = 1 AND ${scope.sql} ORDER BY u.name`,
     ...scope.params,
-  );
+  )).map((user) => ({ ...user, avatar_url: avatarUrl(user.avatar_path) }));
   const ids = users.map((u) => u.id);
   if (!ids.length) return calculatePeriodStats({
     from, to, today, users, records: [], breaks: [], leave: [], holidays: new Set(),
