@@ -78,3 +78,23 @@ test('absence days use each employee’s weekend override or company default', (
   });
   assert.deepEqual(period.employees.map((employee) => employee.absent_days), [3, 2, 2]);
 });
+
+test('historical attendance starts absence tracking before the employee account was created', () => {
+  const period = calculatePeriodStats({
+    from: '2026-10-01', to: '2026-10-05', today: '2026-10-06',
+    users: [{
+      id: 14, name: 'Imported employee', hire_date: null,
+      created_at: '2026-10-05T08:00:00.000Z', first_attendance_date: '2026-10-01',
+    }],
+    records: [{
+      id: 1401, user_id: 14, work_date: '2026-10-01',
+      check_in_at: '2026-10-01T06:13:00.000Z', check_out_at: '2026-10-01T14:57:00.000Z', late_minutes: 0,
+    }],
+    breaks: [], leave: [], holidays: new Set(),
+    scheduleForUser: () => ({ weekend_days: [5, 6] }), isWorkingDay,
+  });
+
+  assert.equal(period.employees[0].attendance_days, 1);
+  assert.equal(period.employees[0].absent_days, 2); // October 4 and 5
+  assert.equal(period.employees[0].attendance_rate, 33);
+});

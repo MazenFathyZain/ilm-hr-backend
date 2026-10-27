@@ -66,7 +66,9 @@ async function attendancePeriod(viewer, settings, today, range = {}) {
   const scope = await scopeFilter(viewer, 'u.id');
   const users = (await all(
     `SELECT u.id, u.name, u.employee_code, u.avatar_path, t.name AS team_name,
-            u.hire_date, u.created_at, u.work_start, u.work_end, u.late_grace_minutes, u.weekend_days
+            u.hire_date, u.created_at, u.work_start, u.work_end, u.late_grace_minutes, u.weekend_days,
+            (SELECT MIN(a.work_date) FROM attendance a
+             WHERE a.user_id = u.id AND a.check_in_at IS NOT NULL) AS first_attendance_date
      FROM users u LEFT JOIN teams t ON t.id = u.team_id
      WHERE u.is_active = 1 AND ${scope.sql} ORDER BY u.name`,
     ...scope.params,

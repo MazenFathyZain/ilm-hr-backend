@@ -20,6 +20,7 @@ export function calculatePeriodStats({ from, to, today, users, records, breaks, 
   }));
   const byUser = new Map(employees.map((employee) => [employee.user_id, employee]));
   const attended = new Set();
+  const firstAttendanceByUser = new Map();
   const awayByRecord = new Map(breaks.map((b) => [b.attendance_id, Number(b.seconds_away)]));
   const workedSeconds = new Map();
   const completedDays = new Map();
@@ -27,6 +28,10 @@ export function calculatePeriodStats({ from, to, today, users, records, breaks, 
     const employee = byUser.get(record.user_id);
     if (!employee) continue;
     attended.add(`${record.user_id}:${record.work_date}`);
+    const firstAttendance = firstAttendanceByUser.get(record.user_id);
+    if (!firstAttendance || record.work_date < firstAttendance) {
+      firstAttendanceByUser.set(record.user_id, record.work_date);
+    }
     employee.attendance_days++;
     if (record.late_minutes > 0) employee.late_days++;
     if (record.check_out_at) {
@@ -55,7 +60,9 @@ export function calculatePeriodStats({ from, to, today, users, records, breaks, 
   const countTo = to < lastFinishedDay ? to : lastFinishedDay;
   for (const user of users) {
     const employee = byUser.get(user.id);
-    const start = user.hire_date ?? user.created_at?.slice(0, 10) ?? from;
+    const employmentStart = user.hire_date ?? user.created_at?.slice(0, 10) ?? from;
+    const firstAttendance = user.first_attendance_date ?? firstAttendanceByUser.get(user.id);
+    const start = firstAttendance && firstAttendance < employmentStart ? firstAttendance : employmentStart;
     const countFrom = from > start ? from : start;
     const schedule = scheduleForUser(user);
     let expectedDays = 0;
